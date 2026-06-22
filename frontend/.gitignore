@@ -1,0 +1,16 @@
+# Dependencies and build output
+node_modules/
+dist/
+.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Local env — never commit
+.env
+.env.local
+.env.*.local
+
+# Misc
+.DS_Store
+.idea/
+.vscode/
+*.swp

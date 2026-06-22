@@ -1,0 +1,89 @@
+[tool.poetry]
+name = "eda-agent"
+version = "0.1.0"
+description = "Conversational EDA agent over BigQuery and Google Workspace"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "agents" }, { include = "tools" }, { include = "config" }]
+
+[tool.poetry.scripts]
+eda = "main:cli"             # `poetry run eda` launches the REPL
+
+# ── Runtime dependencies ──────────────────────────────────────────────────────
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+# Deep Agents runtime (LangGraph-backed, includes planning + filesystem + subagents)
+deepagents = "^0.6.11"
+
+# LangChain model integrations
+langchain-google-vertexai = "^2.0"     # Gemini via Vertex AI
+langchain-google-community = "^2.0"    # BQ / Drive loaders
+
+# GCP / BigQuery
+google-cloud-bigquery = { version = "^3.42", extras = ["pandas"] }
+google-cloud-bigquery-storage = "^2.25"
+google-cloud-storage = "^2.18"
+google-auth = "^2.29"
+
+# Google Workspace (Drive / Sheets / Docs OAuth)
+google-api-python-client = "^2.130"
+google-auth-oauthlib = "^1.2"
+
+# Data / Viz
+pandas = ">=2.2,<4.0"
+numpy = "^1.26"
+pyarrow = "^15.0"
+matplotlib = "^3.8"
+plotly = "^5.22"
+kaleido = "^0.2.1"                     # plotly static PNG export
+seaborn = "^0.13"
+
+# SQL validation — TICKET-002 (read-only enforcement) + TICKET-004 (dialect check)
+sqlglot = "^25.0"
+
+# Reports
+jinja2 = "^3.1"
+weasyprint = "^62.0"                   # HTML → PDF (optional, heavy dep)
+
+# API server
+fastapi = "^0.115"
+uvicorn = { version = "^0.29", extras = ["standard"] }
+python-multipart = "^0.0.9"
+
+# Config / CLI
+python-dotenv = "^1.0"
+rich = "^13.7"
+click = "^8.1"
+
+# ── Dev / Test dependencies ───────────────────────────────────────────────────
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2"
+pytest-asyncio = "^0.23"
+ruff = "^0.4"
+mypy = "^1.10"
+ipykernel = "^6.29"
+
+# ── Build system ──────────────────────────────────────────────────────────────
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# ── Ruff (linter/formatter) config ────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
+
+# ── Pytest config ─────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

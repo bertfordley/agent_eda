@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Secrets — never commit these
+.env
+oauth_client_secrets.json
+oauth_token.json
+service_account.json
+*.json.secret
+
+# Agent output directories (generated at runtime)
+charts/
+reports/
+workspace/
+
+# Misc
+.DS_Store
+.idea/
+.vscode/
+*.swp
