@@ -154,9 +154,11 @@ class Settings:
         if not self.checkpoint_enabled:
             _log = logging.getLogger(__name__)
             _log.warning(
-                "CHECKPOINT_DB_URI is not set — conversation memory is disabled "
-                "(single-turn only). Set CHECKPOINT_DB_URI and CHECKPOINT_ENCRYPTION_KEY "
-                "to enable persistence."
+                "CHECKPOINT_DB_URI is not set — running in dev fallback mode. "
+                "Conversation memory is client-provided (no server-side audit trail). "
+                "DEV ONLY: do NOT use for regulated data in production. "
+                "Set CHECKPOINT_DB_URI and CHECKPOINT_ENCRYPTION_KEY to enable "
+                "server-authoritative persistence."
             )
         else:
             # Encryption is mandatory when persistence is on: conversation history

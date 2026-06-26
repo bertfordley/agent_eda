@@ -196,17 +196,29 @@ def get_agent():
     return _agent
 
 
-def chat(message: str, thread_id: str | None = None) -> str:
+def chat(
+    message: str,
+    thread_id: str | None = None,
+    messages: list[dict] | None = None,
+) -> str:
     """Send a message and return the agent's text reply (non-streaming)."""
     agent = get_agent()
     config: dict = {"recursion_limit": AGENT_RECURSION_LIMIT}
     if thread_id:
         config["configurable"] = {"thread_id": thread_id}
+
+    # Production path (checkpoint_enabled=True): single new user message;
+    # checkpointer supplies history. Client messages ignored — server is authoritative.
+    # DEV FALLBACK (checkpoint_enabled=False): pre-sanitized client history is
+    # the full context. No server-side audit trail — DEV ONLY.
+    # Regulated traffic MUST run with checkpoint_enabled=true.
+    if settings.checkpoint_enabled or not messages:
+        input_state: dict = {"messages": [{"role": "user", "content": message}]}
+    else:
+        input_state = {"messages": messages}  # already sanitized by server.py
+
     try:
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": message}]},
-            config=config,
-        )
+        result = agent.invoke(input_state, config=config)
     except GraphRecursionError:
         return (
             "I was unable to complete the task within the allowed number of steps. "

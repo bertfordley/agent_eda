@@ -157,10 +157,18 @@ export class ChatStreamClient {
     }, delay);
   }
 
-  send(message: string, threadId?: string): void {
+  // The client always sends { message, thread_id, messages } on every turn.
+  // The server ignores messages when persistence is enabled (uses checkpointer);
+  // uses it in dev fallback mode (checkpoint_enabled=false). No client branching.
+  send(
+    message: string,
+    threadId?: string,
+    messages?: Array<{ role: string; content: string }>,
+  ): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      const payload: Record<string, string> = { message };
+      const payload: Record<string, unknown> = { message };
       if (threadId) payload.thread_id = threadId;
+      if (messages) payload.messages = messages;
       this.ws.send(JSON.stringify(payload));
     }
   }

@@ -206,6 +206,26 @@ export function useChatStream(): {
       convId = actionsRef.current.createConversation();
     }
 
+    // Build history from existing completed messages BEFORE appending the new
+    // user turn so the in-progress placeholder never enters the array.
+    // Only "complete" status messages with non-empty content are included —
+    // streaming, pending, and error messages are excluded.
+    // The new user turn is appended as the final element.
+    // The client always sends { message, thread_id, messages } on every turn.
+    // The server ignores messages when persistence is enabled and uses the
+    // checkpointer instead — no client-side branching on environment needed.
+    const conversation = conversationsRef.current[convId];
+    const history: Array<{ role: string; content: string }> = [];
+    if (conversation) {
+      for (const msgId of conversation.messageIds) {
+        const msg = messagesRef.current[msgId];
+        if (msg && msg.status === "complete" && msg.content) {
+          history.push({ role: msg.role, content: msg.content });
+        }
+      }
+    }
+    history.push({ role: "user", content: trimmed });
+
     actionsRef.current.appendUserMessage(convId, trimmed);
     const assistantId = actionsRef.current.beginAssistantMessage(convId);
     _currentAssistantId = assistantId;
@@ -213,8 +233,7 @@ export function useChatStream(): {
     // Send the durable thread_id if this conversation already has one (i.e.
     // any prior turn received a "thread" frame).  Absent on the very first
     // turn — the server will generate an id and echo it back via onThreadId.
-    const conversation = conversationsRef.current[convId];
-    _client?.send(trimmed, conversation?.threadId);
+    _client?.send(trimmed, conversation?.threadId, history);
   }
 
   return { sendMessage, connectionStatus: connection };

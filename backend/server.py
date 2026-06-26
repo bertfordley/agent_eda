@@ -102,14 +102,41 @@ app.add_middleware(
 _CHART_EXTENSIONS = {".png", ".html"}
 _REPORT_EXTENSIONS = {".html", ".pdf"}
 
+# Maximum client history messages accepted in dev fallback mode.
+# Bounds context window usage and cost when checkpoint_enabled is False.
+MAX_HISTORY_MESSAGES = 50
+
 
 class ChatRequest(BaseModel):
     message: str
     thread_id: str | None = None
+    messages: list | None = None
 
 
 class ChatResponse(BaseModel):
     reply: str
+
+
+def sanitize_client_history(raw: list[dict]) -> list[dict]:
+    """
+    Sanitize client-sent conversation history for use as agent input.
+
+    DEV FALLBACK ONLY — no server-side audit trail; history lives client-side.
+    Regulated traffic MUST run with checkpoint_enabled=true.
+
+    Transformations applied:
+    - Strips every field except role and content (no ids, status, artifactIds)
+    - Drops turns with empty/whitespace-only content (prevents the Gemini
+      empty-content error class fixed in the streaming migration)
+    """
+    result = []
+    for msg in raw:
+        role = msg.get("role", "")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        result.append({"role": role, "content": content})
+    return result
 
 
 def _safe_path(base_dir: Path, filename: str) -> Path:
@@ -127,7 +154,11 @@ async def health():
         "model": settings.vertex_model,
         "fs_backend": settings.agent_fs_backend,
         "telemetry": settings.telemetry_level if settings.telemetry_enabled else "disabled",
-        "checkpoint": "enabled" if settings.checkpoint_enabled else "disabled",
+        "checkpoint": (
+            "enabled"
+            if settings.checkpoint_enabled
+            else "disabled (dev fallback — client history, no server audit)"
+        ),
     }
 
 
@@ -136,10 +167,22 @@ async def chat_endpoint(req: ChatRequest):
     session_id = uuid.uuid4().hex
     thread_id = (req.thread_id or "").strip() or uuid.uuid4().hex
     sid_token = current_session_id.set(session_id)
-    tid_token = current_thread_id.set(thread_id)
+    # Cache keying (TICKET-7): production uses thread_id (survives reconnects);
+    # dev fallback uses session_id (scoped to this request only).
+    cache_thread_id = thread_id if settings.checkpoint_enabled else session_id
+    tid_token = current_thread_id.set(cache_thread_id)
+
+    # Prepare sanitized history for fallback mode (TICKET-4).
+    # DEV FALLBACK ONLY — ignored entirely when checkpoint_enabled is True.
+    sanitized_history: list[dict] | None = None
+    if not settings.checkpoint_enabled and isinstance(req.messages, list) and req.messages:
+        sanitized_history = sanitize_client_history(req.messages)
+
     try:
         with turn_span(req.message, channel="rest"):
-            reply = await asyncio.to_thread(agent_chat, req.message, thread_id)
+            reply = await asyncio.to_thread(
+                agent_chat, req.message, thread_id, sanitized_history
+            )
         return ChatResponse(reply=reply)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -231,10 +274,46 @@ async def chat_stream(websocket: WebSocket):
                 # with every subsequent turn in this conversation.
                 await websocket.send_json({"type": "thread", "thread_id": thread_id})
 
-            # ── Run one agent turn ─────────────────────────────────────────
-            input_state = {"messages": [{"role": "user", "content": message}]}
+            # ── Parse optional client history (TICKET-2) ──────────────────
+            # Always validated; used below only when checkpoint_enabled=False.
+            # When checkpoint_enabled=True the field is accepted but ignored.
+            client_messages_raw: list[dict] | None = None
+            raw_msgs = data.get("messages")
+            if raw_msgs is not None:
+                msgs_valid = (
+                    isinstance(raw_msgs, list)
+                    and all(
+                        isinstance(m, dict)
+                        and m.get("role") in ("user", "assistant")
+                        and isinstance(m.get("content"), str)
+                        for m in raw_msgs
+                    )
+                    and (not raw_msgs or raw_msgs[-1].get("role") == "user")
+                )
+                if not msgs_valid:
+                    await websocket.send_json({"error": "Malformed messages payload"})
+                    continue
+                # Apply cap to bound context window usage and cost.
+                client_messages_raw = list(raw_msgs[-MAX_HISTORY_MESSAGES:])
+
+            # ── Build agent input (TICKET-4) ───────────────────────────────
+            # Production path (checkpoint_enabled=True): single new user message;
+            # checkpointer supplies history. Client history intentionally ignored —
+            # the server (checkpointer) is the authoritative source for audit.
+            #
+            # DEV FALLBACK (checkpoint_enabled=False): sanitized client history
+            # is the full context. No server-side audit trail — DEV ONLY.
+            # Regulated traffic MUST run with checkpoint_enabled=true.
+            if settings.checkpoint_enabled or not client_messages_raw:
+                input_state = {"messages": [{"role": "user", "content": message}]}
+            else:
+                input_state = {"messages": sanitize_client_history(client_messages_raw)}
+
             sid_token = current_session_id.set(session_id)
-            tid_token = current_thread_id.set(thread_id)
+            # Cache keying (TICKET-7): production keys by thread_id (survives reconnects);
+            # dev fallback keys by session_id (stable for this WebSocket connection only).
+            cache_thread_id = thread_id if settings.checkpoint_enabled else session_id
+            tid_token = current_thread_id.set(cache_thread_id)
 
             # Per-turn context: maps task tool_call_id -> subagent_type so that
             # subagent_end frames carry the correct subagent name.  Populated at
