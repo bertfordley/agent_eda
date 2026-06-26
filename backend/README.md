@@ -12,6 +12,7 @@ FastAPI server running a Gemini 2.0 Flash agent (via Vertex AI and the Deep Agen
 | Poetry | 1.8+ | `pip install poetry` or [official installer](https://python-poetry.org/docs/) |
 | Google Cloud SDK | any recent | For `gcloud auth` — [install guide](https://cloud.google.com/sdk/docs/install) |
 | A GCP project | — | With Vertex AI API enabled |
+| Docker Engine | 24+ | For local Postgres (optional — required for conversation persistence) |
 
 ---
 
@@ -103,6 +104,66 @@ The Drive tools use OAuth 2.0 so the agent can read Sheets and files on the user
 1. In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials), create an **OAuth 2.0 Client ID** (Desktop app type).
 2. Download the JSON and save it as `./oauth_client_secrets.json`.
 3. On the first Drive tool call, a browser window opens for consent. The token is then cached at `./oauth_token.json`.
+
+### 5. Checkpoint database (optional — enables conversation persistence)
+
+Conversation memory is stored in Postgres via LangGraph's checkpointer. Without it, each WebSocket connection is single-turn (the current default). To enable:
+
+```bash
+# Start the local Postgres container (data persists across restarts via Docker volume)
+docker compose up -d
+
+# Verify it's healthy
+docker compose ps
+
+# Run the migration once (creates checkpoint tables — idempotent)
+poetry run init-checkpoints
+```
+
+Set these variables in `.env` (matching the defaults in `docker-compose.yml`):
+
+```dotenv
+POSTGRES_USER=eda
+POSTGRES_PASSWORD=eda
+POSTGRES_DB=eda_checkpoints
+CHECKPOINT_DB_URI=postgresql://eda:eda@localhost:5432/eda_checkpoints
+CHECKPOINT_ENCRYPTION_KEY=<output of: openssl rand -base64 32>
+```
+
+**Encryption is mandatory when `CHECKPOINT_DB_URI` is set** — the server refuses to start without a valid key (conversation history can contain discussion of regulated data).
+
+```bash
+# Stop the container (data preserved in the Docker volume)
+docker compose down
+
+# Stop and wipe all checkpoint data
+docker compose down -v
+```
+
+**GCP deployment:** set `CHECKPOINT_DB_URI` to your Cloud SQL connection string — the same variable, no code change needed. The Postgres major version in `docker-compose.yml` is pinned to 16 to match the intended Cloud SQL version; keep them in lockstep when upgrading.
+
+#### Checkpoint pruning (required before sustained traffic)
+
+LangGraph writes one row per graph step (~15–30 rows per multi-step turn). Without pruning, the checkpoint table grows unboundedly. Run the pruning script as a scheduled job:
+
+```bash
+# Preview — shows how many rows would be deleted, no changes made
+poetry run prune-checkpoints --dry-run
+
+# Prune (keeps the most recent 20 checkpoints per thread — the default)
+poetry run prune-checkpoints
+
+# Stricter retention
+poetry run prune-checkpoints --keep-last 10
+```
+
+**Scheduling:**
+
+- **Locally (cron):** add to crontab — e.g. daily at 2 AM:
+  ```
+  0 2 * * * cd /path/to/backend && poetry run prune-checkpoints
+  ```
+- **GCP (Cloud Scheduler):** create a Cloud Run Job that runs the Docker image with `CMD ["poetry", "run", "prune-checkpoints"]`, then trigger it daily with Cloud Scheduler.
 
 ---
 

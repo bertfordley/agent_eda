@@ -82,6 +82,11 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   messageIds: string[];
+  // Durable LangGraph conversation identity.  Absent until the first server
+  // response (the "thread" frame echoes the id it generated or accepted).
+  // Once set, sent with every subsequent turn so the checkpointer resumes
+  // the correct conversation state.  Distinct from session_id (ephemeral).
+  threadId?: string;
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -144,4 +149,5 @@ export interface GlobalAppState {
   toggleHistorySidebar: () => void;
   setComposerValue: (value: string) => void;
   setConnection: (status: ConnectionStatus) => void;
+  setConversationThreadId: (conversationId: string, threadId: string) => void;
 }

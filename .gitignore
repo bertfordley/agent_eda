@@ -1,0 +1,75 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Poetry
+# poetry.lock is checked in intentionally — do not add it here
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ruff
+.ruff_cache/
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── Environment / Secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# GCP credentials
+service_account.json
+*-service-account.json
+application_default_credentials.json
+
+# Google OAuth tokens (written at runtime by the Drive tools)
+oauth_token.json
+oauth_client_secrets.json
+
+# ── Agent runtime outputs ─────────────────────────────────────────────────────
+backend/charts/
+backend/reports/
+backend/workspace/
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# docker-compose.override.yml is typically local-only
+docker-compose.override.yml
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Local planning / AI context files ────────────────────────────────────────
+CLAUDE.md
+IMPLEMENTATION_PLAN.md
+.claude/

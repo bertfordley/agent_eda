@@ -36,14 +36,18 @@ export function useChatStream(): {
   const registerArtifact = useAppStore((s) => s.registerArtifact);
   const linkArtifactToMessage = useAppStore((s) => s.linkArtifactToMessage);
   const createConversation = useAppStore((s) => s.createConversation);
+  const setConversationThreadId = useAppStore((s) => s.setConversationThreadId);
   const messages = useAppStore((s) => s.messages);
+  const conversations = useAppStore((s) => s.conversations);
 
   // Mutable refs so WebSocket callbacks always see the latest state values
   // without needing to be recreated when state changes.
   const activeConvRef = useRef(activeConversationId);
   const messagesRef = useRef(messages);
+  const conversationsRef = useRef(conversations);
   activeConvRef.current = activeConversationId;
   messagesRef.current = messages;
+  conversationsRef.current = conversations;
 
   // Bundle all store actions into one ref so the effect closure stays stable.
   const actionsRef = useRef({
@@ -56,6 +60,7 @@ export function useChatStream(): {
     beginAssistantMessage,
     appendUserMessage,
     createConversation,
+    setConversationThreadId,
   });
   actionsRef.current = {
     setConnection,
@@ -67,6 +72,7 @@ export function useChatStream(): {
     beginAssistantMessage,
     appendUserMessage,
     createConversation,
+    setConversationThreadId,
   };
 
   useEffect(() => {
@@ -131,6 +137,47 @@ export function useChatStream(): {
         onToolEnd: (_tool: string) => {
           // No-op: real token content supersedes the activity line.
         },
+
+        // TICKET-1.3: subagent lifecycle and token callbacks.
+        // Mirror the onToolStart pattern: inject a status line only while the
+        // message is still empty so we don't interrupt mid-stream content.
+        // TODO(future): render subagent activity in a dedicated sub-region
+        // (subagent-cards pattern) rather than appending to the main message.
+        onSubagentStart: (name: string) => {
+          if (_currentAssistantId) {
+            const currentMsg = messagesRef.current[_currentAssistantId];
+            if (currentMsg && currentMsg.content.length === 0) {
+              actionsRef.current.appendAssistantToken(
+                _currentAssistantId,
+                `*Delegating to ${name}…*\n\n`,
+              );
+            }
+          }
+        },
+
+        // Append streamed subagent text so the user sees motion during the
+        // delegation window instead of a frozen "Thinking…" state.
+        onSubagentToken: (_ns: string, text: string) => {
+          if (_currentAssistantId) {
+            actionsRef.current.appendAssistantToken(_currentAssistantId, text);
+          }
+        },
+
+        // No-op: main-agent tokens that follow naturally supersede the
+        // delegation status line once the subagent completes.
+        onSubagentEnd: (_name: string) => {
+          // No-op.
+        },
+
+        // TICKET-4.1: store the server-generated thread_id on the conversation
+        // so every subsequent turn in this conversation resumes the same
+        // LangGraph checkpoint state.
+        onThreadId: (threadId: string) => {
+          const convId = activeConvRef.current;
+          if (convId && threadId) {
+            actionsRef.current.setConversationThreadId(convId, threadId);
+          }
+        },
       });
 
       _client = client;
@@ -162,7 +209,12 @@ export function useChatStream(): {
     actionsRef.current.appendUserMessage(convId, trimmed);
     const assistantId = actionsRef.current.beginAssistantMessage(convId);
     _currentAssistantId = assistantId;
-    _client?.send(trimmed);
+
+    // Send the durable thread_id if this conversation already has one (i.e.
+    // any prior turn received a "thread" frame).  Absent on the very first
+    // turn — the server will generate an id and echo it back via onThreadId.
+    const conversation = conversationsRef.current[convId];
+    _client?.send(trimmed, conversation?.threadId);
   }
 
   return { sendMessage, connectionStatus: connection };

@@ -1,5 +1,5 @@
 """
-config/settings.py  +  config/gcp.py  (combined for brevity)
+config/settings.py
 ─────────────────────────────────────────────────────────────────────────────
 Typed settings from .env / environment, and the GCP client factory.
 
@@ -11,6 +11,8 @@ Auth priority (standard ADC order):
 
 from __future__ import annotations
 
+import base64
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -51,6 +53,12 @@ def _parse_int(name: str, default: str) -> int:
         raise ValueError(f"Env var {name}='{raw}' is not a valid integer.")
 
 
+def _parse_bool(name: str, default: str) -> bool:
+    """Parse an env var as a boolean. Truthy: '1','true','yes','on' (case-insensitive)."""
+    raw = os.getenv(name, default).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _parse_cors_origins(name: str, default: str) -> list[str]:
     """Parse CORS_ALLOW_ORIGINS as a comma-separated list of origin URLs."""
     raw = os.getenv(name, default)
@@ -84,23 +92,94 @@ class Settings:
     charts_dir: Path = Path(os.getenv("CHARTS_DIR", "./charts"))
     reports_dir: Path = Path(os.getenv("REPORTS_DIR", "./reports"))
 
-    # TICKET-009: restrict CORS to known origins instead of wildcard "*".
-    # CORS_ALLOW_ORIGINS is a comma-separated list of allowed origin URLs.
-    # Default covers Vite dev (:5173) and Vite preview (:4173) servers.
+    # CORS — comma-separated allowed frontend origins.
+    # Default covers Vite dev (:5173) and Vite preview (:4173).
     cors_allow_origins: list[str] = _parse_cors_origins(
         "CORS_ALLOW_ORIGINS",
         "http://localhost:5173,http://localhost:4173",
     )
 
+    # ── Telemetry ──────────────────────────────────────────────────────────────
+    # TELEMETRY_ENABLED   — master switch; set to false to silence all emission.
+    # TELEMETRY_LEVEL     — "standard": metadata + governance (default).
+    #                       "debug": also captures full model message payloads.
+    # TELEMETRY_MAX_VALUE_CHARS — per-field string truncation ceiling.
+    # TELEMETRY_SAMPLE_ROWS     — rows included when summarising a DataFrame.
+    telemetry_enabled: bool = _parse_bool("TELEMETRY_ENABLED", "true")
+    telemetry_level: str = os.getenv("TELEMETRY_LEVEL", "standard")
+    telemetry_max_value_chars: int = _parse_int("TELEMETRY_MAX_VALUE_CHARS", "2000")
+    telemetry_sample_rows: int = _parse_int("TELEMETRY_SAMPLE_ROWS", "5")
+
+    # ── Checkpoint persistence ─────────────────────────────────────────────────
+    # checkpoint_enabled is derived in __init__ after the encryption key is
+    # validated — do not read it before __init__ completes.
+    checkpoint_db_uri: str = os.getenv("CHECKPOINT_DB_URI", "")
+    checkpoint_encryption_key: str = os.getenv("CHECKPOINT_ENCRYPTION_KEY", "")
+    checkpoint_pool_min: int = _parse_int("CHECKPOINT_POOL_MIN", "2")
+    checkpoint_pool_max: int = _parse_int("CHECKPOINT_POOL_MAX", "10")
+    checkpoint_enabled: bool = False
+
     def __init__(self):
         for d in [self.charts_dir, self.reports_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
         if self.agent_fs_backend not in {"state", "local"}:
             raise ValueError(
                 f"AGENT_FS_BACKEND must be 'state' or 'local', got '{self.agent_fs_backend}'"
             )
         if self.agent_fs_backend == "local":
             self.agent_workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.telemetry_level not in {"standard", "debug"}:
+            raise ValueError(
+                f"TELEMETRY_LEVEL must be 'standard' or 'debug', got '{self.telemetry_level}'"
+            )
+
+        # Force LangSmith / LangChain tracing off so Deep Agents' bundled
+        # langsmith client never ships traces to the cloud regardless of what
+        # the environment has set. setdefault preserves an explicit "true" if
+        # someone intentionally enables it, but that must be a conscious choice.
+        os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+        os.environ.setdefault("LANGSMITH_TRACING", "false")
+
+        # Restrict LangGraph checkpoint deserialization to safe types — mitigates
+        # the msgpack-deserialization RCE class (CVE-2026-28277). setdefault so it
+        # can be consciously overridden, but secure-by-default.
+        os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
+
+        # Derive checkpoint_enabled and enforce the encryption invariant.
+        # Persistence is opt-in: if no URI is set the agent runs single-turn.
+        self.checkpoint_enabled = bool(self.checkpoint_db_uri)
+
+        if not self.checkpoint_enabled:
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "CHECKPOINT_DB_URI is not set — conversation memory is disabled "
+                "(single-turn only). Set CHECKPOINT_DB_URI and CHECKPOINT_ENCRYPTION_KEY "
+                "to enable persistence."
+            )
+        else:
+            # Encryption is mandatory when persistence is on: conversation history
+            # may contain regulated data and must never be stored in plaintext.
+            if not self.checkpoint_encryption_key:
+                raise ValueError(
+                    "CHECKPOINT_DB_URI is set but CHECKPOINT_ENCRYPTION_KEY is empty. "
+                    "Encryption is mandatory whenever persistence is on. "
+                    "Generate a 32-byte AES-256 key with: openssl rand -base64 32"
+                )
+            try:
+                key_bytes = base64.b64decode(self.checkpoint_encryption_key)
+            except Exception:
+                raise ValueError(
+                    "CHECKPOINT_ENCRYPTION_KEY is not valid base64. "
+                    "Generate a 32-byte AES-256 key with: openssl rand -base64 32"
+                )
+            if len(key_bytes) != 32:
+                raise ValueError(
+                    f"CHECKPOINT_ENCRYPTION_KEY must decode to exactly 32 bytes (AES-256); "
+                    f"got {len(key_bytes)} bytes. "
+                    "Generate a key with: openssl rand -base64 32"
+                )
 
 
 settings = Settings()

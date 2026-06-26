@@ -3,10 +3,17 @@ tools/bigquery_tools.py
 ─────────────────────────────────────────────────────────────────────────────
 BigQuery tools as plain Python callables.
 
-Session isolation (TICKET-001):
-  _df_cache is keyed by (session_id, cache_key) via a contextvars.ContextVar
-  so concurrent users never overwrite each other's DataFrames.
-  An LRU eviction policy caps the cache at MAX_SESSIONS sessions.
+DataFrame cache (TICKET-4.2):
+  _df_cache is keyed by (thread_id, cache_key) via a contextvars.ContextVar
+  so concurrent conversations never overwrite each other's DataFrames.
+  thread_id aligns the cache with the durable LangGraph conversation identity —
+  within a process, DataFrames survive WebSocket reconnects on the same thread.
+
+  INVARIANT — DataFrames must NEVER be stored in the LangGraph graph state or
+  checkpoint. A DataFrame in graph state would be serialized to Postgres at
+  every graph step, causing unbounded storage bloat. The cache (this module)
+  is the ONLY correct place to hold DataFrame objects. Graph state holds
+  cache_key strings only. Do not remove this guardrail.
 
 Read-only SQL enforcement (TICKET-002):
   bq_run_query calls _assert_read_only() which uses sqlglot to parse and
@@ -14,16 +21,18 @@ Read-only SQL enforcement (TICKET-002):
 
 Dialect validation (TICKET-004):
   sqlglot.parse uses dialect="bigquery"; a ParseError surfaces immediately
-  to the agent as a correction message without executing any query.
+  to the agent as a correction message.
 
 Cost circuit-breaker (TICKET-003):
   A dry-run estimate is checked against bq_max_bytes_billed before the real
-  query is submitted. Queries that would exceed the budget are rejected with
-  a size estimate so the agent can add filters.
+  query is submitted.
 
 Materialize row cap (TICKET-010):
-  Results exceeding MATERIALIZE_ROW_CAP rows are not pulled into pandas
-  memory; the agent is instructed to aggregate in SQL instead.
+  Results exceeding MATERIALIZE_ROW_CAP rows are not pulled into pandas memory.
+
+Governance telemetry (TELEMETRY):
+  log_query_executed is called at every exit path of bq_run_query so the
+  audit trail captures every SQL attempt, accepted or rejected.
 
 Tools:
   bq_list_datasets       – list datasets in the project
@@ -50,61 +59,60 @@ from config.settings import get_bq_client, safe_query_config, dry_run_query_conf
 
 logger = logging.getLogger(__name__)
 
-# ── Session-scoped DataFrame cache (TICKET-001) ────────────────────────────────
-# Key: (session_id, cache_key) → DataFrame
-# session_id is set per-request by server.py via current_session_id.set(...)
-# before invoking the agent.
+# ── Thread-scoped DataFrame cache ─────────────────────────────────────────────
+# Key: (thread_id, cache_key) → DataFrame
+#
+# current_session_id — ephemeral per-WebSocket-connection; used for telemetry.
+# current_thread_id  — durable LangGraph conversation identity; keys the cache
+#                      so DataFrames survive reconnects within the same process.
+# Both are set per-turn by server.py. Do NOT conflate them.
 
 current_session_id: ContextVar[str] = ContextVar("current_session_id", default="__default__")
+current_thread_id: ContextVar[str] = ContextVar("current_thread_id", default="__default__")
 
 _df_cache: dict[tuple[str, str], pd.DataFrame] = {}
 _df_cache_lock = threading.Lock()
+_thread_last_access: dict[str, float] = {}
+MAX_THREADS = 32
 
-# LRU tracking: session_id → last access epoch float
-_session_last_access: dict[str, float] = {}
-MAX_SESSIONS = 32
-
-# Row count above which we refuse to materialize and ask the agent to aggregate.
 MATERIALIZE_ROW_CAP = 1_000_000
 
 
-def _evict_lru_session() -> None:
-    """Remove the least-recently-used session's entries when cap is exceeded."""
-    if len(_session_last_access) <= MAX_SESSIONS:
+def _evict_lru_thread() -> None:
+    """Remove the least-recently-used thread's entries when cap is exceeded."""
+    if len(_thread_last_access) <= MAX_THREADS:
         return
-    oldest_session = min(_session_last_access, key=lambda s: _session_last_access[s])
-    keys_to_remove = [k for k in _df_cache if k[0] == oldest_session]
+    oldest = min(_thread_last_access, key=lambda t: _thread_last_access[t])
+    keys_to_remove = [k for k in _df_cache if k[0] == oldest]
     for k in keys_to_remove:
         del _df_cache[k]
-    del _session_last_access[oldest_session]
-    logger.debug("Evicted session cache for session_id=%s", oldest_session)
+    del _thread_last_access[oldest]
+    logger.debug("Evicted DataFrame cache for thread_id=%s", oldest)
 
 
 def get_cached_df(key: str = "latest") -> Optional[pd.DataFrame]:
-    session_id = current_session_id.get()
+    thread_id = current_thread_id.get()
     with _df_cache_lock:
-        _session_last_access[session_id] = time.monotonic()
-        return _df_cache.get((session_id, key))
+        _thread_last_access[thread_id] = time.monotonic()
+        return _df_cache.get((thread_id, key))
 
 
 def set_cached_df(df: pd.DataFrame, key: str = "latest") -> None:
-    session_id = current_session_id.get()
+    thread_id = current_thread_id.get()
     with _df_cache_lock:
-        _session_last_access[session_id] = time.monotonic()
-        _df_cache[(session_id, key)] = df
-        _evict_lru_session()
+        _thread_last_access[thread_id] = time.monotonic()
+        _df_cache[(thread_id, key)] = df
+        _evict_lru_thread()
 
 
-# ── SQL safety (TICKET-002, TICKET-004) ───────────────────────────────────────
+# ── SQL safety ────────────────────────────────────────────────────────────────
 
 def _assert_read_only(sql: str) -> None:
     """
     Parse sql with sqlglot (BigQuery dialect) and raise ValueError if:
-      - The SQL does not parse as valid BigQuery Standard SQL (TICKET-004).
+      - The SQL does not parse as valid BigQuery Standard SQL.
       - More than one statement is present (semicolon injection).
-      - Any statement is not a SELECT / UNION / WITH…SELECT (TICKET-002).
-    On success returns None. Callers catch ValueError and surface it as a
-    tool-result string so the agent can self-correct without hitting BigQuery.
+      - Any statement is not a SELECT / UNION / WITH…SELECT.
     """
     import sqlglot
     import sqlglot.errors
@@ -131,8 +139,6 @@ def _assert_read_only(sql: str) -> None:
 
     stmt = statements[0]
 
-    # Walk the AST to detect any mutation node anywhere in the tree.
-    # This catches subquery-wrapped mutations too.
     MUTATING_TYPES = (
         exp.Insert, exp.Update, exp.Delete, exp.Drop,
         exp.Create, exp.Alter, exp.Merge, exp.TruncateTable,
@@ -144,7 +150,6 @@ def _assert_read_only(sql: str) -> None:
                 "Only read-only SELECT queries are allowed."
             )
 
-    # The root expression must ultimately be a read operation.
     ALLOWED_ROOT_TYPES = (exp.Select, exp.Union, exp.With, exp.Subquery)
     if not isinstance(stmt, ALLOWED_ROOT_TYPES):
         raise ValueError(
@@ -152,8 +157,6 @@ def _assert_read_only(sql: str) -> None:
             "Rewrite as a SELECT statement."
         )
 
-
-# ── Shared text summary ────────────────────────────────────────────────────────
 
 def _df_summary(df: pd.DataFrame, max_rows: int = 20) -> str:
     buf = io.StringIO()
@@ -236,72 +239,143 @@ def bq_run_query(sql: str, cache_key: str = "latest") -> str:
     """
     Execute a BigQuery Standard SQL query.
 
-    Results are cached internally (as a DataFrame) so downstream analysis
-    and chart tools can reuse them without re-running BigQuery.
+    Results are cached so downstream analysis and chart tools can reuse
+    them without re-running BigQuery.
 
     Args:
-        sql:       Standard SQL. Use fully-qualified table refs where possible.
+        sql:       Standard SQL. Use fully-qualified table refs.
         cache_key: Name for this result set (default 'latest').
-                   Use descriptive names like 'monthly_revenue' when you'll
-                   reference the same data across multiple tool calls.
 
     Returns:
         Text summary (shape + first 20 rows). Full DataFrame is in cache.
     """
-    # TICKET-002 + TICKET-004: parse and validate SQL before touching BigQuery.
+    # Import here to avoid a circular import at module load time.
+    # telemetry imports bigquery_tools (for current_session_id), so
+    # bigquery_tools must not import telemetry at the top level.
+    from telemetry.governance import log_query_executed
+
+    # TICKET-002 + TICKET-004: validate SQL before touching BigQuery.
     try:
         _assert_read_only(sql)
     except ValueError as e:
+        log_query_executed(
+            sql=sql,
+            row_count=None,
+            bytes_processed=None,
+            rejected=True,
+            rejection_reason=str(e),
+            cache_key=cache_key,
+        )
         return f"SQL rejected: {e}"
 
     try:
         client = get_bq_client()
 
-        # TICKET-003: dry-run cost estimate before committing to the real query.
+        # TICKET-003: dry-run cost estimate.
+        dry_run_bytes: int | None = None
         try:
             dry_job = client.query(sql, job_config=dry_run_query_config())
-            estimated_bytes = dry_job.total_bytes_processed or 0
-            if estimated_bytes > settings.bq_max_bytes_billed:
-                estimated_gb = estimated_bytes / 1e9
+            dry_run_bytes = dry_job.total_bytes_processed or 0
+            if dry_run_bytes > settings.bq_max_bytes_billed:
+                estimated_gb = dry_run_bytes / 1e9
                 budget_gb = settings.bq_max_bytes_billed / 1e9
-                return (
+                msg = (
                     f"Query would scan ~{estimated_gb:.2f} GB, which exceeds the "
                     f"{budget_gb:.1f} GB budget cap. Add WHERE filters or a LIMIT "
                     "clause to reduce the scan size before resubmitting."
                 )
+                log_query_executed(
+                    sql=sql,
+                    row_count=None,
+                    bytes_processed=None,
+                    rejected=True,
+                    rejection_reason=msg,
+                    cache_key=cache_key,
+                    dry_run_bytes=dry_run_bytes,
+                )
+                return msg
         except GoogleAPIError as e:
-            return f"BigQuery query dry-run failed: {e}"
+            err_msg = f"BigQuery query dry-run failed: {e}"
+            log_query_executed(
+                sql=sql,
+                row_count=None,
+                bytes_processed=None,
+                rejected=True,
+                rejection_reason=err_msg,
+                cache_key=cache_key,
+            )
+            return err_msg
 
-        # TICKET-010: check result size before materializing to pandas.
+        # TICKET-010: row count check before materializing.
         query_job = client.query(sql, job_config=safe_query_config())
         result = query_job.result()
         total_rows = result.total_rows
 
         if total_rows is not None and total_rows > MATERIALIZE_ROW_CAP:
-            return (
+            msg = (
                 f"Query would return {total_rows:,} rows, which exceeds the "
                 f"{MATERIALIZE_ROW_CAP:,}-row materialization cap. "
                 "Add GROUP BY / aggregation in SQL to reduce the result set, "
-                "then resubmit. Only aggregated summaries should be pulled into memory."
+                "then resubmit."
             )
+            log_query_executed(
+                sql=sql,
+                row_count=total_rows,
+                bytes_processed=None,
+                rejected=True,
+                rejection_reason=msg,
+                cache_key=cache_key,
+                dry_run_bytes=dry_run_bytes,
+            )
+            return msg
 
         df = result.to_dataframe()
+        bytes_processed = getattr(query_job, "total_bytes_processed", None)
 
         if df.empty:
             set_cached_df(df, key=cache_key)
-            return f"[cache_key='{cache_key}'] Query succeeded but returned 0 rows. No data to analyze."
+            log_query_executed(
+                sql=sql,
+                row_count=0,
+                bytes_processed=bytes_processed,
+                rejected=False,
+                rejection_reason=None,
+                cache_key=cache_key,
+                dry_run_bytes=dry_run_bytes,
+            )
+            return (
+                f"[cache_key='{cache_key}'] Query succeeded but returned 0 rows. "
+                "No data to analyze."
+            )
 
         set_cached_df(df, key=cache_key)
+        log_query_executed(
+            sql=sql,
+            row_count=len(df),
+            bytes_processed=bytes_processed,
+            rejected=False,
+            rejection_reason=None,
+            cache_key=cache_key,
+            dry_run_bytes=dry_run_bytes,
+        )
         return f"[cache_key='{cache_key}']\n" + _df_summary(df)
 
     except GoogleAPIError as e:
-        return f"BigQuery query failed: {e}"
+        err_msg = f"BigQuery query failed: {e}"
+        log_query_executed(
+            sql=sql,
+            row_count=None,
+            bytes_processed=None,
+            rejected=True,
+            rejection_reason=err_msg,
+            cache_key=cache_key,
+        )
+        return err_msg
 
 
 def bq_profile_dataset(dataset_id: str) -> str:
     """
     Quick profile of an entire dataset: table names, row counts, sizes.
-    Use this to orient yourself before deciding which tables to explore.
 
     Args:
         dataset_id: BigQuery dataset name.
@@ -323,7 +397,9 @@ def bq_profile_dataset(dataset_id: str) -> str:
                 )
             except Exception as e:
                 logger.warning("Metadata fetch failed for %s: %s", t.table_id, e)
-                lines.append(f"  {t.table_id} (metadata unavailable: {type(e).__name__})")
+                lines.append(
+                    f"  {t.table_id} (metadata unavailable: {type(e).__name__})"
+                )
 
         header = f"  {'Table':<45} {'Rows':>12}  {'Size':>8}"
         return f"Dataset: {dataset_id}\n{header}\n" + "\n".join(lines)

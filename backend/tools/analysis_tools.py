@@ -35,8 +35,11 @@ def _require(key: str) -> pd.DataFrame:
     df = get_cached_df(key)
     if df is None:
         raise ValueError(
-            f"No DataFrame under key '{key}'. "
-            "Run bq_run_query or sheet_from_url first."
+            f"[CACHE_MISS cache_key='{key}'] "
+            "The DataFrame for this key is no longer in memory. "
+            "The server-process cache is ephemeral — it does not survive server restarts. "
+            f"Re-run the originating bq_run_query(cache_key='{key}') to reload the data, "
+            "then retry this operation."
         )
     return df
 

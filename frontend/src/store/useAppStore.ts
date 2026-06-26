@@ -121,6 +121,12 @@ export const useAppStore = create<GlobalAppState>()(
     toggleHistorySidebar: () => set((s) => ({ isHistorySidebarOpen: !s.isHistorySidebarOpen })),
     setComposerValue: (value) => set({ composerValue: value }),
     setConnection: (status: ConnectionStatus) => set({ connection: status }),
+
+    setConversationThreadId: (conversationId, threadId) => set((s) => {
+      const conversation = s.conversations[conversationId];
+      if (!conversation) return s;
+      return { conversations: { ...s.conversations, [conversationId]: { ...conversation, threadId } } };
+    }),
   }))
 );
 

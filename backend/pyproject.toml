@@ -4,22 +4,23 @@ version = "0.1.0"
 description = "Conversational EDA agent over BigQuery and Google Workspace"
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
-packages = [{ include = "agents" }, { include = "tools" }, { include = "config" }]
+packages = [{ include = "agents" }, { include = "tools" }, { include = "config" }, { include = "persistence" }, { include = "scripts" }]
 
 [tool.poetry.scripts]
 eda = "main:cli"             # `poetry run eda` launches the REPL
+init-checkpoints = "scripts.init_checkpoint_db:main"  # run once after `docker compose up -d`
+prune-checkpoints = "scripts.prune_checkpoints:main"  # scheduled job — prune old checkpoint rows
 
 # ── Runtime dependencies ──────────────────────────────────────────────────────
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.13"
 
 # Deep Agents runtime (LangGraph-backed, includes planning + filesystem + subagents)
 deepagents = "^0.6.11"
 
 # LangChain model integrations
-langchain-google-vertexai = "^2.0"     # Gemini via Vertex AI
-langchain-google-community = "^2.0"    # BQ / Drive loaders
+langchain-google-vertexai = "*"     # Gemini via Vertex AI — unconstrained so deepagents picks langchain-core
 
 # GCP / BigQuery
 google-cloud-bigquery = { version = "^3.42", extras = ["pandas"] }
@@ -34,10 +35,10 @@ google-auth-oauthlib = "^1.2"
 # Data / Viz
 pandas = ">=2.2,<4.0"
 numpy = "^1.26"
-pyarrow = "^15.0"
+pyarrow = "^19.0.1"
 matplotlib = "^3.8"
 plotly = "^5.22"
-kaleido = "^0.2.1"                     # plotly static PNG export
+kaleido = "0.2.1"                      # plotly static PNG export — exact pin required
 seaborn = "^0.13"
 
 # SQL validation — TICKET-002 (read-only enforcement) + TICKET-004 (dialect check)
@@ -56,6 +57,17 @@ python-multipart = "^0.0.9"
 python-dotenv = "^1.0"
 rich = "^13.7"
 click = "^8.1"
+
+# ── Checkpoint persistence (Phase 2) ─────────────────────────────────────────
+# Security pins: CVE-2025-67644 (checkpointer SQL injection) and
+# CVE-2026-28277 (msgpack-deserialization RCE) require these minimums.
+# If poetry lock conflicts with deepagents' langgraph constraint, STOP —
+# do not downgrade past these pins to resolve the conflict.
+langgraph = ">=1.0.10"
+langgraph-checkpoint = ">=4.0.1"
+langgraph-checkpoint-postgres = "^3.1.0"
+psycopg = { version = "^3.2", extras = ["binary", "pool"] }
+pycryptodome = "^3.20"
 
 # ── Dev / Test dependencies ───────────────────────────────────────────────────
 
