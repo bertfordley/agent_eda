@@ -99,3 +99,8 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[[tool.poetry.source]]
+name = "corporate-repo"
+url = "https://nrm.us.equifax.com/repository/efxpypi/simple"
+priority = "primary"
