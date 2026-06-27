@@ -1,6 +1,38 @@
 # EDA Agent — Backend
 
-FastAPI server running a Gemini 2.0 Flash agent (via Vertex AI and the Deep Agents / LangGraph runtime). Connects to BigQuery and optionally Google Drive / Sheets. Exposes a REST + WebSocket API consumed by the [eda-agent-frontend](https://github.com/your-org/eda-agent-frontend).
+FastAPI server running a Gemini 2.0 Flash agent (via Vertex AI and the Deep Agents / LangGraph runtime). Connects to BigQuery and optionally Google Drive / Sheets. Exposes a REST + WebSocket API consumed by the React frontend.
+
+---
+
+## Quick answer: how do I run this without Postgres?
+
+**Just don't set `CHECKPOINT_DB_URI`.** The server detects its absence at startup and enters **dev fallback mode** automatically — conversation memory is provided by the frontend (history is sent with each message, stored in the browser). No Docker, no database, no migration scripts needed.
+
+The only required env var is `GCP_PROJECT_ID`.
+
+---
+
+## Two operating modes
+
+### Dev fallback mode (default — no database required)
+
+The default. Works on a laptop with no infrastructure dependencies beyond GCP access.
+
+- `CHECKPOINT_DB_URI` is **not set**
+- Conversation history is sent by the frontend on every turn and passed directly to the agent
+- No server-side audit trail — suitable for local development only
+- `/health` reports `"checkpoint": "disabled (dev fallback — client history, no server audit)"`
+
+### Production mode (requires Postgres)
+
+Activated by setting `CHECKPOINT_DB_URI`. History is stored server-side in Postgres via LangGraph's `AsyncPostgresSaver` checkpointer. Client-sent history is ignored entirely when this mode is active.
+
+- Provides a durable, server-authoritative audit trail
+- Conversation survives server restarts and frontend refreshes
+- Required for regulated or production workloads
+- `/health` reports `"checkpoint": "enabled"`
+
+Switching between modes is a single env-var change — no code change, no frontend change.
 
 ---
 
@@ -12,26 +44,37 @@ FastAPI server running a Gemini 2.0 Flash agent (via Vertex AI and the Deep Agen
 | Poetry | 1.8+ | `pip install poetry` or [official installer](https://python-poetry.org/docs/) |
 | Google Cloud SDK | any recent | For `gcloud auth` — [install guide](https://cloud.google.com/sdk/docs/install) |
 | A GCP project | — | With Vertex AI API enabled |
-| Docker Engine | 24+ | For local Postgres (optional — required for conversation persistence) |
+| Docker Engine | 24+ | **Production mode only** — not needed for dev fallback |
 
 ---
 
 ## Project layout
 
 ```
-eda-agent-backend/
+backend/
 ├── agents/
-│   └── orchestrator.py   # Deep Agents executor, subagent specs, system prompt
+│   └── orchestrator.py       # Deep Agents executor, subagent specs, system prompt
 ├── config/
-│   └── settings.py       # Typed env-var settings + GCP credential factory
+│   └── settings.py           # Typed env-var settings + GCP credential factory
+├── persistence/
+│   └── checkpointer.py       # AsyncPostgresSaver pool (production mode only)
+├── telemetry/
+│   ├── core.py               # Structured JSON telemetry emitter
+│   └── governance.py         # Audit events (query_executed, thread_resumed, …)
 ├── tools/
-│   ├── bigquery_tools.py # bq_list_datasets, bq_list_tables, bq_run_query …
-│   ├── drive_tools.py    # sheet_from_url, drive_search_files …
-│   ├── analysis_tools.py # df_describe, df_correlations, df_group_by …
-│   ├── viz_tools.py      # chart_bar, chart_line, chart_interactive …
-│   └── report_tools.py   # report_start, report_add_section, report_generate_html …
-├── server.py             # FastAPI app — REST endpoints + WebSocket /chat/stream
-├── main.py               # CLI REPL (poetry run eda)
+│   ├── bigquery_tools.py     # bq_list_datasets, bq_list_tables, bq_run_query …
+│   ├── drive_tools.py        # sheet_from_url, drive_search_files …
+│   ├── analysis_tools.py     # df_describe, df_correlations, df_group_by …
+│   ├── viz_tools.py          # chart_bar, chart_line, chart_interactive …
+│   └── report_tools.py       # report_start → report_generate_html/pdf
+├── scripts/
+│   ├── init_checkpoint_db.py # One-time migration (production mode only)
+│   └── prune_checkpoints.py  # Scheduled pruning (production mode only)
+├── tests/
+│   └── test_sanitize_client_history.py
+├── history.py                # Pure sanitization utility for client history
+├── server.py                 # FastAPI app — REST + WebSocket /chat/stream
+├── main.py                   # CLI REPL (poetry run eda)
 ├── pyproject.toml
 └── .env.example
 ```
@@ -46,9 +89,7 @@ eda-agent-backend/
 poetry install
 ```
 
-Creates a `.venv/` and installs all Python dependencies including FastAPI, Deep Agents, LangChain, the BigQuery client, Matplotlib, Plotly, and Pandas.
-
-> **WeasyPrint (PDF export) is a heavy optional dependency.** If the install fails on WeasyPrint, comment it out of `pyproject.toml` — HTML reports still work; only PDF export is affected. On Ubuntu/Debian you may need: `sudo apt install libpango-1.0-0 libpangocairo-1.0-0`. On macOS: `brew install pango`.
+> **WeasyPrint (PDF export) is a heavy optional dependency.** If the install fails, comment it out of `pyproject.toml` — HTML reports still work. On macOS: `brew install pango`. On Ubuntu/Debian: `sudo apt install libpango-1.0-0 libpangocairo-1.0-0`.
 
 ### 2. Configure environment
 
@@ -56,24 +97,37 @@ Creates a `.venv/` and installs all Python dependencies including FastAPI, Deep 
 cp .env.example .env
 ```
 
-Open `.env` and set the required values:
+Open `.env` and fill in the values for your target mode:
+
+#### Dev fallback mode (minimum config)
 
 ```dotenv
-# ── Required ───────────────────────────────────────────────────────────────────
-GCP_PROJECT_ID=your-gcp-project-id       # e.g. my-analytics-project
+# ── Required ─────────────────────────────────────────────────────────────────
+GCP_PROJECT_ID=your-gcp-project-id
 
-# ── Recommended ────────────────────────────────────────────────────────────────
-BQ_DEFAULT_DATASET=your_dataset          # shorthand for unqualified table refs
-GCP_REGION=us-central1                   # Vertex AI endpoint region
+# ── Recommended ──────────────────────────────────────────────────────────────
+BQ_DEFAULT_DATASET=your_dataset   # shorthand for unqualified table refs
+GCP_REGION=us-central1            # Vertex AI endpoint region
 
-# ── Optional (defaults shown) ──────────────────────────────────────────────────
-VERTEX_AI_MODEL=gemini-2.0-flash         # or gemini-1.5-pro, gemini-2.0-pro
+# ── Optional (defaults shown) ─────────────────────────────────────────────────
+VERTEX_AI_MODEL=gemini-2.0-flash
 VERTEX_AI_TEMPERATURE=0.0
-BQ_MAX_BYTES_BILLED=10000000000          # 10 GB cost guard
-AGENT_FS_BACKEND=state                   # "state" (ephemeral) or "local" (persistent)
-CHARTS_DIR=./charts                      # where chart images are written
-REPORTS_DIR=./reports                    # where HTML/PDF reports are written
+BQ_MAX_BYTES_BILLED=10000000000   # 10 GB cost guard
+AGENT_FS_BACKEND=state            # "state" (ephemeral) or "local" (persistent charts/reports)
+CHARTS_DIR=./charts
+REPORTS_DIR=./reports
+
+# CHECKPOINT_DB_URI is intentionally absent → dev fallback mode
 ```
+
+#### Production mode (add these on top of the above)
+
+```dotenv
+CHECKPOINT_DB_URI=postgresql://eda:yourpassword@localhost:5432/eda_checkpoints
+CHECKPOINT_ENCRYPTION_KEY=<output of: openssl rand -base64 32>
+```
+
+Encryption is mandatory when `CHECKPOINT_DB_URI` is set — the server refuses to start without a valid 32-byte AES-256 key. Conversation history may contain regulated data and must never be stored in plaintext.
 
 ### 3. Authenticate with Google Cloud
 
@@ -81,14 +135,14 @@ REPORTS_DIR=./reports                    # where HTML/PDF reports are written
 gcloud auth application-default login
 ```
 
-This caches credentials at `~/.config/gcloud/application_default_credentials.json`. The server reads them automatically via Application Default Credentials — no extra config needed.
+Credentials are cached at `~/.config/gcloud/application_default_credentials.json` and picked up automatically via Application Default Credentials.
 
-**Using a service account instead?** Place the JSON key at `./service_account.json` and set:
+**Using a service account instead?**
 ```dotenv
 GOOGLE_APPLICATION_CREDENTIALS=./service_account.json
 ```
 
-**Required IAM roles for the credential:**
+**Required IAM roles:**
 
 | Role | Purpose |
 |------|---------|
@@ -99,18 +153,18 @@ GOOGLE_APPLICATION_CREDENTIALS=./service_account.json
 
 ### 4. Google Drive / Sheets OAuth (optional)
 
-The Drive tools use OAuth 2.0 so the agent can read Sheets and files on the user's behalf. Skip this if you only need BigQuery.
+Skip if you only need BigQuery.
 
-1. In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials), create an **OAuth 2.0 Client ID** (Desktop app type).
+1. In [Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials), create an **OAuth 2.0 Client ID** (Desktop app type).
 2. Download the JSON and save it as `./oauth_client_secrets.json`.
-3. On the first Drive tool call, a browser window opens for consent. The token is then cached at `./oauth_token.json`.
+3. On the first Drive tool call the server opens a browser for consent. Token is cached at `./oauth_token.json`.
 
-### 5. Checkpoint database (optional — enables conversation persistence)
+### 5. Checkpoint database (production mode only)
 
-Conversation memory is stored in Postgres via LangGraph's checkpointer. Without it, each WebSocket connection is single-turn (the current default). To enable:
+Skip this section entirely for dev fallback mode.
 
 ```bash
-# Start the local Postgres container (data persists across restarts via Docker volume)
+# Start local Postgres (data persists across restarts via Docker volume)
 docker compose up -d
 
 # Verify it's healthy
@@ -120,120 +174,222 @@ docker compose ps
 poetry run init-checkpoints
 ```
 
-Set these variables in `.env` (matching the defaults in `docker-compose.yml`):
-
-```dotenv
-POSTGRES_USER=eda
-POSTGRES_PASSWORD=eda
-POSTGRES_DB=eda_checkpoints
-CHECKPOINT_DB_URI=postgresql://eda:eda@localhost:5432/eda_checkpoints
-CHECKPOINT_ENCRYPTION_KEY=<output of: openssl rand -base64 32>
-```
-
-**Encryption is mandatory when `CHECKPOINT_DB_URI` is set** — the server refuses to start without a valid key (conversation history can contain discussion of regulated data).
-
 ```bash
-# Stop the container (data preserved in the Docker volume)
+# Stop the container (data preserved)
 docker compose down
 
 # Stop and wipe all checkpoint data
 docker compose down -v
 ```
 
-**GCP deployment:** set `CHECKPOINT_DB_URI` to your Cloud SQL connection string — the same variable, no code change needed. The Postgres major version in `docker-compose.yml` is pinned to 16 to match the intended Cloud SQL version; keep them in lockstep when upgrading.
+**GCP deployment:** set `CHECKPOINT_DB_URI` to your Cloud SQL connection string — same variable, no code change.
 
-#### Checkpoint pruning (required before sustained traffic)
+#### Checkpoint pruning
 
-LangGraph writes one row per graph step (~15–30 rows per multi-step turn). Without pruning, the checkpoint table grows unboundedly. Run the pruning script as a scheduled job:
+LangGraph writes ~15–30 rows per agent turn. Run the pruning script as a scheduled job to prevent unbounded growth:
 
 ```bash
-# Preview — shows how many rows would be deleted, no changes made
+# Preview — no changes made
 poetry run prune-checkpoints --dry-run
 
-# Prune (keeps the most recent 20 checkpoints per thread — the default)
+# Prune (keeps the most recent 20 checkpoints per thread — default)
 poetry run prune-checkpoints
 
 # Stricter retention
 poetry run prune-checkpoints --keep-last 10
 ```
 
-**Scheduling:**
-
-- **Locally (cron):** add to crontab — e.g. daily at 2 AM:
-  ```
-  0 2 * * * cd /path/to/backend && poetry run prune-checkpoints
-  ```
-- **GCP (Cloud Scheduler):** create a Cloud Run Job that runs the Docker image with `CMD ["poetry", "run", "prune-checkpoints"]`, then trigger it daily with Cloud Scheduler.
+Scheduling (e.g. daily at 2 AM via cron):
+```
+0 2 * * * cd /path/to/backend && poetry run prune-checkpoints
+```
 
 ---
 
 ## Running
 
-### API server (used by the frontend)
+### API server
 
 ```bash
 poetry run uvicorn server:app --reload --port 8000
 ```
 
-Verify it's running:
+Verify startup mode:
 ```bash
 curl http://localhost:8000/health
-# {"status": "ok", "model": "gemini-2.0-flash", "fs_backend": "state"}
 ```
 
-### CLI REPL (useful for testing without the frontend)
+Dev fallback mode response:
+```json
+{
+  "status": "ok",
+  "model": "gemini-2.0-flash",
+  "fs_backend": "state",
+  "telemetry": "standard",
+  "checkpoint": "disabled (dev fallback — client history, no server audit)"
+}
+```
+
+Production mode response:
+```json
+{
+  "status": "ok",
+  "model": "gemini-2.0-flash",
+  "fs_backend": "state",
+  "telemetry": "standard",
+  "checkpoint": "enabled"
+}
+```
+
+### CLI REPL (quick testing without the frontend)
 
 ```bash
 poetry run eda
+```
+
+Note: the CLI REPL is single-turn — it does not send a history array. For multi-turn conversations, use the frontend or the WebSocket endpoint directly.
+
+### Tests
+
+```bash
+poetry run pytest
 ```
 
 ---
 
 ## API reference
 
-All endpoints are on `http://localhost:8000`.
+All endpoints on `http://localhost:8000`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Returns `{status, model, fs_backend}` |
-| `POST` | `/chat` | Single-turn, non-streaming. Body: `{message: string}`. Returns `{reply: string}` |
-| `WS` | `/chat/stream` | Streaming chat. Send `{message: string}`, receive text tokens then `{done: true}` or `{error: "..."}` |
-| `GET` | `/charts` | List generated chart files: `[{name, url}]` |
+| `GET` | `/health` | Mode, model, telemetry level, checkpoint status |
+| `POST` | `/chat` | Non-streaming. Body: `{message, thread_id?, messages?}`. Returns `{reply}` |
+| `WS` | `/chat/stream` | Streaming chat (see protocol below) |
+| `GET` | `/charts` | List generated chart files: `[{name, url, mtime}]` |
 | `GET` | `/charts/{filename}` | Download a chart image |
-| `GET` | `/reports` | List generated report files: `[{name, url}]` |
+| `GET` | `/reports` | List generated report files: `[{name, url, mtime}]` |
 | `GET` | `/reports/{filename}` | Download a report (HTML or PDF) |
 
-**WebSocket protocol detail:** the server sends raw text tokens via `send_text()` and JSON control frames via `send_json()` on the same socket. Clients must attempt `JSON.parse()` on every message and fall back to treating the payload as a literal text token if parsing fails.
+### WebSocket protocol — `/chat/stream`
+
+**Client → server** (JSON, every turn):
+```json
+{
+  "message": "what tables are in the sales dataset?",
+  "thread_id": "abc123",
+  "messages": [
+    {"role": "user",      "content": "hello"},
+    {"role": "assistant", "content": "Hi! What would you like to analyse?"},
+    {"role": "user",      "content": "what tables are in the sales dataset?"}
+  ]
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `message` | Yes | The new user turn |
+| `thread_id` | No | Durable conversation identity. Omit on the first turn; the server generates one and echoes it back |
+| `messages` | No | Full conversation history with the new user turn as the final element. Used in dev fallback mode; silently ignored in production mode |
+
+**Server → client** (in order):
+
+| Frame | When |
+|-------|------|
+| `{"type": "thread", "thread_id": "…"}` | First turn only, when server generated the id — store it and send it back on every subsequent turn |
+| `{"type": "tool_start", "tool": "…", "input": "…"}` | Before a tool call |
+| `{"type": "tool_end", "tool": "…"}` | After a tool call |
+| `{"type": "subagent_start", "name": "…"}` | When a subagent is spawned |
+| `{"type": "subagent_end", "name": "…"}` | When a subagent completes |
+| `{"type": "subagent_token", "ns": "…", "text": "…"}` | Streaming tokens from a subagent |
+| `<raw string>` | Main-agent streaming text token (not JSON) |
+| `{"done": true}` | Turn complete |
+| `{"error": "…"}` | Turn failed |
+
+**Parsing rule:** attempt `JSON.parse()` on every message. If the result is a plain object, inspect `frame.type` or check for `done`/`error`. If parsing fails (or the value is not an object), the payload is a raw text token. Never forward an unrecognised object frame as a token.
 
 ---
 
 ## Architecture
 
 ```
-FastAPI server (server.py)
+FastAPI (server.py)
 │
-└─ Deep Agents executor (agents/orchestrator.py)
-   │  LangGraph runtime
-   │  Gemini 2.0 Flash via Vertex AI
-   │
-   ├─ Tools (all registered in tools/__init__.py → ALL_TOOLS)
-   │   ├─ bigquery_tools    bq_list_datasets, bq_list_tables,
-   │   │                    bq_describe_table, bq_run_query, bq_profile_dataset
-   │   ├─ drive_tools       sheet_from_url, drive_search_files,
-   │   │                    drive_read_file, doc_to_text
-   │   ├─ analysis_tools    df_describe, df_correlations, df_group_by,
-   │   │                    df_time_series, df_compare, df_value_counts
-   │   ├─ viz_tools         chart_bar, chart_line, chart_scatter,
-   │   │                    chart_histogram, chart_heatmap, chart_interactive
-   │   └─ report_tools      report_start, report_add_section, report_add_chart,
-   │                        report_generate_html, report_generate_pdf, report_to_drive
-   │
-   └─ Subagents (spawned on demand via Deep Agents' built-in `task` tool)
-       ├─ bq_explorer    Deep multi-step BigQuery schema discovery + SQL
-       └─ viz_analyst    Chart generation + report assembly
+├─ Dev fallback (CHECKPOINT_DB_URI not set):
+│    Frontend sends history → sanitize_client_history() → agent input
+│    No server-side audit trail. LOCAL DEVELOPMENT ONLY.
+│
+└─ Production (CHECKPOINT_DB_URI set):
+     AsyncPostgresSaver reads history from Postgres
+     Client-sent history is ignored entirely
+     AES-256-GCM encryption at rest (mandatory)
+
+Both paths converge at:
+  │
+  └─ Deep Agents executor (agents/orchestrator.py)
+       LangGraph runtime · Gemini 2.0 Flash via Vertex AI
+       │
+       ├─ Tools (tools/__init__.py → ALL_TOOLS)
+       │   ├─ bigquery_tools    bq_list_datasets, bq_list_tables,
+       │   │                    bq_describe_table, bq_run_query, bq_profile_dataset
+       │   ├─ drive_tools       sheet_from_url, drive_search_files, drive_read_file
+       │   ├─ analysis_tools    df_describe, df_correlations, df_group_by,
+       │   │                    df_time_series, df_compare, df_value_counts
+       │   ├─ viz_tools         chart_bar, chart_line, chart_scatter,
+       │   │                    chart_histogram, chart_heatmap, chart_interactive
+       │   └─ report_tools      report_start → report_add_section → report_generate_html/pdf
+       │
+       └─ Subagents (spawned on demand via Deep Agents' built-in `task` tool)
+           ├─ bq_explorer    Deep multi-step BigQuery schema discovery + SQL
+           └─ viz_analyst    Chart generation + report assembly
 ```
 
-The server is stateless — there is no session store or conversation history. Each WebSocket message is a single-turn request to the agent. Chat history persistence is handled by the frontend (IndexedDB).
+### Key identifiers
+
+| Identifier | Scope | Keys |
+|------------|-------|------|
+| `session_id` | Per WebSocket connection (ephemeral, dies with the process) | In-process DataFrame cache (dev fallback); telemetry events |
+| `thread_id` | Per conversation (durable, survives restarts) | LangGraph checkpointer (production); DataFrame cache (production) |
+
+These must never be conflated.
+
+### DataFrame cache
+
+BigQuery results are cached in-process as Pandas DataFrames, keyed by `(cache_key, thread_id)`. In dev fallback mode the key uses `session_id` so the cache remains stable within a single WebSocket connection. DataFrames are never written to LangGraph state or checkpoints — only the string `cache_key` lives in graph state.
+
+### Telemetry
+
+Every significant event (turn start/end, tool calls, model requests, governance events) is emitted as one JSON line to stdout. Each line carries `session_id`, `thread_id`, `turn_id`, and a monotonic sequence number for reconstructing async interleave.
+
+```bash
+# Standard telemetry (metadata + governance events)
+TELEMETRY_LEVEL=standard   # default
+
+# Debug telemetry (also includes full model message payloads)
+TELEMETRY_LEVEL=debug
+```
+
+---
+
+## Development
+
+```bash
+# Run tests
+poetry run pytest
+
+# Lint
+poetry run ruff check .
+
+# Format
+poetry run ruff format .
+```
+
+### Adding a new tool
+
+1. Add your function to the appropriate file in `tools/`, decorated with `@tool`.
+2. Import and append it to `ALL_TOOLS` in `tools/__init__.py`.
+3. If it belongs to a subagent, also add it to the relevant `tools` list in `agents/orchestrator.py`.
+4. Restart the server — tools register at startup.
 
 ---
 
@@ -247,44 +403,34 @@ poetry run uvicorn server:app --host 0.0.0.0 --port 8000 --workers 2
 poetry run gunicorn server:app -w 2 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 ```
 
-To serve the compiled frontend from the same process, add to `server.py`:
+To serve the compiled frontend from the same process:
 ```python
+# server.py
 from fastapi.staticfiles import StaticFiles
-app.mount("/", StaticFiles(directory="../eda-agent-frontend/dist", html=True), name="frontend")
+app.mount("/", StaticFiles(directory="../frontend/dist", html=True), name="frontend")
 ```
-
----
-
-## Development
-
-```bash
-# Run tests
-poetry run pytest
-
-# Lint + format
-poetry run ruff check .
-poetry run ruff format .
-```
-
-### Adding a new tool
-
-1. Add your function to the appropriate file in `tools/`, decorated with `@tool`.
-2. Import and append it to `ALL_TOOLS` in `tools/__init__.py`.
-3. If it belongs to a subagent, add it to the relevant `tools` list in `agents/orchestrator.py`.
-4. Restart the server — tools register at startup.
 
 ---
 
 ## Troubleshooting
 
 **"Required environment variable GCP_PROJECT_ID is not set"**
-Run `cp .env.example .env` from this directory and set `GCP_PROJECT_ID`.
+Run `cp .env.example .env` and fill in `GCP_PROJECT_ID`.
 
 **"403 Access denied" from BigQuery**
-Check `gcloud auth list` to confirm which account is active, then ensure it has `bigquery.user` and `bigquery.dataViewer` on the project.
+Run `gcloud auth list` to confirm the active account, then check it has `roles/bigquery.user` and `roles/bigquery.dataViewer` on the project.
 
 **Gemini returns empty responses or "model not found"**
-Confirm the Vertex AI API is enabled: [console.cloud.google.com/apis/library/aiplatform.googleapis.com](https://console.cloud.google.com/apis/library/aiplatform.googleapis.com). Also confirm `GCP_REGION` is a region where Gemini is available (`us-central1` has the broadest coverage).
+Confirm the Vertex AI API is enabled in your project. Confirm `GCP_REGION` is a region where Gemini is available (`us-central1` has the broadest coverage).
+
+**"CHECKPOINT_ENCRYPTION_KEY is not valid base64" at startup**
+Generate a fresh key: `openssl rand -base64 32`. Paste the full output (including any trailing `=`) into `.env` as `CHECKPOINT_ENCRYPTION_KEY`.
+
+**Agent answers ignore previous messages in dev fallback mode**
+The CLI REPL and the REST `/chat` endpoint are single-turn by design. Multi-turn memory in dev fallback mode requires the frontend, which sends the history array on every turn. Using the WebSocket endpoint directly also works if you build and send the `messages` array yourself.
+
+**DataFrame cache miss ("re-run the query") after reconnect**
+Expected — DataFrames live in the server process and are lost on restart or reconnect. The agent is instructed to transparently re-run the original query; let it proceed.
 
 **WeasyPrint install fails**
-See the note in the Setup section above. Comment it out of `pyproject.toml` if you don't need PDF export.
+Comment out `weasyprint` in `pyproject.toml` if you don't need PDF export. HTML reports still work.
