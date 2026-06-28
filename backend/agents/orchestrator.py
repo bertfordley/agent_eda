@@ -26,19 +26,29 @@ from langgraph.errors import GraphRecursionError
 from config.settings import settings
 from telemetry.core import log_event, truncate_value
 from tools import ALL_TOOLS
-
+from tools.analysis_tools import df_check_key, df_describe
 from tools.bigquery_tools import (
-    bq_list_datasets, bq_list_tables,
-    bq_describe_table, bq_run_query, bq_profile_dataset,
-)
-from tools.analysis_tools import df_describe, df_check_key
-from tools.viz_tools import (
-    chart_bar, chart_line, chart_scatter,
-    chart_histogram, chart_heatmap, chart_interactive,
+    bq_describe_table,
+    bq_list_datasets,
+    bq_list_tables,
+    bq_profile_dataset,
+    bq_run_query,
 )
 from tools.report_tools import (
-    report_start, report_add_section, report_add_chart,
-    report_generate_html, report_generate_pdf, report_to_drive,
+    report_add_chart,
+    report_add_section,
+    report_generate_html,
+    report_generate_pdf,
+    report_start,
+    report_to_drive,
+)
+from tools.viz_tools import (
+    chart_bar,
+    chart_heatmap,
+    chart_histogram,
+    chart_interactive,
+    chart_line,
+    chart_scatter,
 )
 
 AGENT_RECURSION_LIMIT = 40
@@ -167,16 +177,51 @@ do not tell the user the data is unavailable; just reload it silently.
 """
 
 
+def _compose_system_prompt(base: str) -> str:
+    """Append the per-deployment data-catalog context and the skills index to a
+    base prompt. Both are no-ops when unconfigured (empty catalog / no skills),
+    so an undeployed/unscoped instance behaves exactly as before."""
+    from config.catalog import get_catalog, render_catalog_prompt
+    from skills.loader import load_skill_index
+
+    parts = [base]
+    catalog_block = render_catalog_prompt(get_catalog())
+    if catalog_block:
+        parts.append(catalog_block)
+    skills_block = load_skill_index()
+    if skills_block:
+        parts.append(skills_block)
+    return "\n\n".join(parts)
+
+
 def build_agent(checkpointer=None):
     # checkpointer=None → single-turn mode (current default).
     # checkpointer=<AsyncPostgresSaver> → durable memory; LangGraph propagates
     # it to subgraphs automatically so bq_explorer and viz_analyst inherit it.
+    #
+    # Agent definition: prefer externalized markdown (agents/definitions/*.md) so
+    # each deployment can customize prompts/subagents without code edits. Fall
+    # back to the in-module constants below when the definitions dir is absent.
+    from agents.loader import definitions_available, load_subagents, main_prompt_base
+    from agents.mcp_client import load_mcp_tools
+
+    if definitions_available():
+        base_prompt = main_prompt_base()
+        subagents = load_subagents()
+    else:
+        base_prompt = SYSTEM_PROMPT
+        subagents = [BQ_EXPLORER_SUBAGENT, VIZ_ANALYST_SUBAGENT]
+
+    # In-process tools + any remote MCP tools (e.g. a knowledge base). The latter
+    # is [] unless MCP_SERVERS is configured, so this is a no-op by default.
+    tools = [*ALL_TOOLS, *load_mcp_tools()]
+
     return create_deep_agent(
         model=_llm(),
-        tools=ALL_TOOLS,
-        system_prompt=SYSTEM_PROMPT,
+        tools=tools,
+        system_prompt=_compose_system_prompt(base_prompt),
         backend=_backend(),
-        subagents=[BQ_EXPLORER_SUBAGENT, VIZ_ANALYST_SUBAGENT],
+        subagents=subagents,
         checkpointer=checkpointer,
     )
 

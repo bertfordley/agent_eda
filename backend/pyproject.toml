@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Conversational EDA agent over BigQuery and Google Workspace"
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
-packages = [{ include = "agents" }, { include = "tools" }, { include = "config" }, { include = "persistence" }, { include = "scripts" }]
+packages = [{ include = "agents" }, { include = "tools" }, { include = "config" }, { include = "persistence" }, { include = "scripts" }, { include = "skills" }]
 
 [tool.poetry.scripts]
 eda = "main:cli"             # `poetry run eda` launches the REPL
@@ -21,6 +21,11 @@ deepagents = "^0.6.11"
 
 # LangChain model integrations
 langchain-google-vertexai = "*"     # Gemini via Vertex AI — unconstrained so deepagents picks langchain-core
+langchain-mcp-adapters = "*"        # MCP CLIENT — load remote MCP server tools (e.g. knowledge base) as LangChain tools
+
+# Config parsing — data catalog + agent/skill markdown frontmatter (declared
+# explicitly rather than relying on it arriving transitively via langchain).
+pyyaml = "^6.0"
 
 # GCP / BigQuery
 google-cloud-bigquery = { version = "^3.42", extras = ["pandas"] }

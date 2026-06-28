@@ -12,6 +12,7 @@ build/
 
 # Virtual environments
 .venv/
+.venv-test/
 venv/
 env/
 
@@ -53,6 +54,11 @@ oauth_client_secrets.json
 backend/charts/
 backend/reports/
 backend/workspace/
+
+# ── Per-deployment data catalog (real file is environment-specific) ───────────
+# The committed template is data_catalog.example.yaml; the live catalog is not.
+backend/data_catalog.yaml
+data_catalog.yaml
 
 # ── IDE / OS ──────────────────────────────────────────────────────────────────
 .DS_Store

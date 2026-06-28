@@ -55,7 +55,14 @@ import pandas as pd
 from google.api_core.exceptions import GoogleAPIError
 from google.cloud import bigquery
 
-from config.settings import get_bq_client, safe_query_config, dry_run_query_config, settings
+from config.catalog import (
+    SCOPE_DENIED,
+    get_catalog,
+    is_dataset_allowed,
+    is_table_allowed,
+    tables_out_of_scope,
+)
+from config.settings import dry_run_query_config, get_bq_client, safe_query_config, settings
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +165,54 @@ def _assert_read_only(sql: str) -> None:
         )
 
 
+# ── Catalog scope enforcement (TICKET — domain deployment) ────────────────────
+# When a data catalog is configured, only its datasets may be touched. Scope is
+# enforced HERE, server-side — the model is never trusted to stay in bounds. An
+# empty catalog (no file configured) disables every check below (backward compat).
+
+
+def _qualify_dataset(dataset_id: str) -> str:
+    """Resolve a dataset ref to fully-qualified `project.dataset`."""
+    dataset_id = dataset_id.strip().strip("`")
+    if dataset_id.count(".") == 0:
+        return f"{settings.gcp_project_id}.{dataset_id}"
+    return dataset_id  # already project.dataset
+
+
+def _qualify_table(table_ref: str) -> str:
+    """Resolve a table ref to fully-qualified `project.dataset.table`."""
+    table_ref = table_ref.strip().strip("`")
+    dots = table_ref.count(".")
+    if dots == 1:  # dataset.table → add project
+        return f"{settings.gcp_project_id}.{table_ref}"
+    if dots == 0 and settings.bq_default_dataset:  # bare name + default dataset configured
+        return f"{settings.gcp_project_id}.{settings.bq_default_dataset}.{table_ref}"
+    return table_ref  # already project.dataset.table (or bare name, no default — BQ API will error)
+
+
+def _assert_query_in_scope(sql: str) -> None:
+    """Reject a query that references any table outside the configured catalog.
+
+    Delegates the parsing/decision to the pure config.catalog.tables_out_of_scope
+    helper (testable in isolation). Raises ValueError with a [SCOPE_DENIED ...]
+    marker when an out-of-scope reference is found. No-op when unscoped.
+    """
+    catalog = get_catalog()
+    denied = tables_out_of_scope(
+        catalog,
+        sql,
+        project=settings.gcp_project_id,
+        default_dataset=settings.bq_default_dataset,
+    )
+    if denied:
+        allowed = ", ".join(sorted(catalog.allowed_dataset_ids))
+        raise ValueError(
+            f"[{SCOPE_DENIED}] Query references table(s) outside this deployment's "
+            f"catalog: {', '.join(denied)}. Allowed datasets: {allowed}. "
+            "Rewrite the query against an allowed dataset."
+        )
+
+
 def _df_summary(df: pd.DataFrame, max_rows: int = 20) -> str:
     buf = io.StringIO()
     buf.write(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} cols\n\n")
@@ -172,7 +227,15 @@ def _df_summary(df: pd.DataFrame, max_rows: int = 20) -> str:
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 def bq_list_datasets() -> str:
-    """List all BigQuery datasets in the configured GCP project."""
+    """List the BigQuery datasets available to this deployment."""
+    # Scoped deployment: return the catalog's datasets directly. We never enumerate
+    # the full project (that would leak out-of-scope dataset names).
+    catalog = get_catalog()
+    if not catalog.is_empty:
+        return "Datasets (this deployment):\n" + "\n".join(
+            f"  • {d.id}" + (f" — {d.description}" if d.description else "")
+            for d in catalog.datasets
+        )
     try:
         client = get_bq_client()
         datasets = list(client.list_datasets())
@@ -190,15 +253,22 @@ def bq_list_tables(dataset_id: str) -> str:
     Args:
         dataset_id: Dataset name, e.g. 'analytics'
     """
+    catalog = get_catalog()
+    ds_fq = _qualify_dataset(dataset_id)
+    if not is_dataset_allowed(catalog, ds_fq):
+        return (
+            f"[{SCOPE_DENIED} dataset='{ds_fq}'] Not in this deployment's catalog. "
+            f"Allowed: {', '.join(sorted(catalog.allowed_dataset_ids))}."
+        )
     try:
         client = get_bq_client()
-        tables = list(client.list_tables(dataset_id))
+        tables = list(client.list_tables(ds_fq))
         if not tables:
-            return f"No tables in '{dataset_id}'."
+            return f"No tables in '{ds_fq}'."
         lines = [f"  • {t.table_id} ({t.table_type})" for t in tables]
-        return f"Tables in `{dataset_id}`:\n" + "\n".join(lines)
+        return f"Tables in `{ds_fq}`:\n" + "\n".join(lines)
     except GoogleAPIError as e:
-        return f"BigQuery error listing tables in '{dataset_id}': {e}"
+        return f"BigQuery error listing tables in '{ds_fq}': {e}"
 
 
 def bq_describe_table(table_ref: str) -> str:
@@ -209,11 +279,15 @@ def bq_describe_table(table_ref: str) -> str:
         table_ref: Fully-qualified ref like 'project.dataset.table'
                    or 'dataset.table' (uses configured project).
     """
+    catalog = get_catalog()
+    table_ref = _qualify_table(table_ref)
+    if not is_table_allowed(catalog, table_ref):
+        return (
+            f"[{SCOPE_DENIED} table='{table_ref}'] Not in this deployment's catalog. "
+            f"Allowed datasets: {', '.join(sorted(catalog.allowed_dataset_ids))}."
+        )
     try:
         client = get_bq_client()
-        if table_ref.count(".") == 1:
-            table_ref = f"{settings.gcp_project_id}.{table_ref}"
-
         table = client.get_table(table_ref)
         buf = io.StringIO()
         buf.write(f"Table: `{table_ref}`\n")
@@ -255,8 +329,11 @@ def bq_run_query(sql: str, cache_key: str = "latest") -> str:
     from telemetry.governance import log_query_executed
 
     # TICKET-002 + TICKET-004: validate SQL before touching BigQuery.
+    # Catalog scope check (domain deployment): reject out-of-scope table refs
+    # server-side, before any BigQuery call. No-op when no catalog is configured.
     try:
         _assert_read_only(sql)
+        _assert_query_in_scope(sql)
     except ValueError as e:
         log_query_executed(
             sql=sql,
@@ -380,15 +457,22 @@ def bq_profile_dataset(dataset_id: str) -> str:
     Args:
         dataset_id: BigQuery dataset name.
     """
+    catalog = get_catalog()
+    ds_fq = _qualify_dataset(dataset_id)
+    if not is_dataset_allowed(catalog, ds_fq):
+        return (
+            f"[{SCOPE_DENIED} dataset='{ds_fq}'] Not in this deployment's catalog. "
+            f"Allowed: {', '.join(sorted(catalog.allowed_dataset_ids))}."
+        )
     try:
         client = get_bq_client()
-        tables = list(client.list_tables(dataset_id))
+        tables = list(client.list_tables(ds_fq))
         if not tables:
-            return f"Dataset '{dataset_id}' is empty."
+            return f"Dataset '{ds_fq}' is empty."
 
         lines = []
         for t in tables[:40]:
-            ref = f"{settings.gcp_project_id}.{dataset_id}.{t.table_id}"
+            ref = f"{ds_fq}.{t.table_id}"
             try:
                 meta = client.get_table(ref)
                 lines.append(

@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Data catalog — per-deployment domain configuration.
+#
+# Copy to data_catalog.yaml and edit for your department's data. The real
+# data_catalog.yaml is gitignored (like .env). If no catalog file is present the
+# app runs UNSCOPED (all datasets visible, no domain context) — fine for local
+# poking, NOT for a real deployment.
+#
+# Two effects:
+#   1. SCOPING  — only the datasets below may be queried (enforced server-side).
+#   2. CONTEXT  — these descriptions are injected into the agent's prompt so it
+#                 understands your data without blind schema exploration.
+#
+# IDs must be fully-qualified:  dataset = project.dataset,  table = project.dataset.table
+# ─────────────────────────────────────────────────────────────────────────────
+
+domain:
+  name: Sales Analytics
+  description: >
+    Order, revenue, and customer data for the Sales department. Grain is one row
+    per order line. Currency is USD unless a column says otherwise.
+
+datasets:
+  - id: my-project.sales
+    description: Core transactional sales data, refreshed hourly.
+    tables:
+      - id: my-project.sales.orders
+        description: One row per order line item.
+        fields:
+          - { name: order_id,    type: STRING,    description: Unique order identifier. }
+          - { name: customer_id, type: STRING,    description: FK to customers.customer_id. }
+          - { name: amount_usd,  type: NUMERIC,   description: Line total in USD. }
+          - { name: created_at,  type: TIMESTAMP, description: Order creation time, UTC. }
+
+      - id: my-project.sales.customers
+        description: One row per customer.
+        fields:
+          - { name: customer_id, type: STRING, description: Unique customer identifier. }
+          - { name: region,      type: STRING, description: Sales region code (NA, EMEA, APAC). }

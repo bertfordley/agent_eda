@@ -65,6 +65,30 @@ def _parse_cors_origins(name: str, default: str) -> list[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+def _parse_mcp_servers(name: str) -> list[dict]:
+    """Parse MCP_SERVERS — a JSON list of remote MCP server connection specs.
+
+    Each entry: {"name": "knowledge_base", "url": "https://...", "transport": "streamable_http"}.
+    Empty/unset → [] (no remote tools; fully backward compatible). Fails fast on
+    malformed JSON so a typo never silently disables the knowledge base.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return []
+    import json
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Env var {name} is not valid JSON: {exc}")
+    if not isinstance(parsed, list) or not all(isinstance(s, dict) for s in parsed):
+        raise ValueError(f"Env var {name} must be a JSON list of objects.")
+    for s in parsed:
+        if not s.get("name") or not s.get("url"):
+            raise ValueError(f"Each {name} entry needs 'name' and 'url'.")
+    return parsed
+
+
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 class Settings:
@@ -79,6 +103,14 @@ class Settings:
     # BigQuery
     bq_default_dataset: str = os.getenv("BQ_DEFAULT_DATASET", "")
     bq_max_bytes_billed: int = _parse_int("BQ_MAX_BYTES_BILLED", str(10 * 1_000_000_000))
+
+    # Data catalog — per-deployment domain scope + NL schema descriptions.
+    # Absent file → unscoped (all datasets visible). See config/catalog.py.
+    data_catalog_path: str = os.getenv("DATA_CATALOG_PATH", "./data_catalog.yaml")
+
+    # Remote MCP servers (e.g. a knowledge base) consumed as additional agent
+    # tools. JSON list; empty by default → no remote tools. See agents/mcp_client.py.
+    mcp_servers: list[dict] = _parse_mcp_servers("MCP_SERVERS")
 
     # Drive OAuth
     oauth_client_secrets: str = os.getenv("GOOGLE_OAUTH_CLIENT_SECRETS", "./oauth_client_secrets.json")

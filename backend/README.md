@@ -53,26 +53,42 @@ Switching between modes is a single env-var change — no code change, no fronte
 ```
 backend/
 ├── agents/
-│   └── orchestrator.py       # Deep Agents executor, subagent specs, system prompt
+│   ├── orchestrator.py       # Deep Agents executor; loads definitions + catalog + skills + MCP tools
+│   ├── loader.py             # agents/definitions/*.md → subagent specs (tool-name → callable)
+│   ├── mcp_client.py         # MCP CLIENT — load remote MCP server tools (e.g. knowledge base)
+│   └── definitions/          # Externalized agent specs (markdown + frontmatter)
+│       ├── main_agent.md     #   main system prompt (catalog + skills appended at build)
+│       ├── bq_explorer.md    #   BigQuery specialist subagent
+│       └── viz_analyst.md    #   charts + reports subagent
 ├── config/
-│   └── settings.py           # Typed env-var settings + GCP credential factory
+│   ├── settings.py           # Typed env-var settings + GCP credential factory
+│   └── catalog.py            # Per-deployment data catalog: domain scope + NL schema, scope enforcement
+├── skills/                   # Reusable analysis playbooks (progressive disclosure)
+│   ├── loader.py             #   build the skills index; fetch a skill body
+│   ├── key-comparison/SKILL.md
+│   └── data-quality-audit/SKILL.md
 ├── persistence/
 │   └── checkpointer.py       # AsyncPostgresSaver pool (production mode only)
 ├── telemetry/
 │   ├── core.py               # Structured JSON telemetry emitter
 │   └── governance.py         # Audit events (query_executed, thread_resumed, …)
 ├── tools/
-│   ├── bigquery_tools.py     # bq_list_datasets, bq_list_tables, bq_run_query …
+│   ├── bigquery_tools.py     # bq_* + catalog scope enforcement (dataset allow-listing)
 │   ├── drive_tools.py        # sheet_from_url, drive_search_files …
 │   ├── analysis_tools.py     # df_describe, df_correlations, df_group_by …
 │   ├── viz_tools.py          # chart_bar, chart_line, chart_interactive …
-│   └── report_tools.py       # report_start → report_generate_html/pdf
+│   ├── report_tools.py       # report_start → report_generate_html/pdf
+│   └── skill_tools.py        # load_skill — fetch a skill's full instructions on demand
 ├── scripts/
 │   ├── init_checkpoint_db.py # One-time migration (production mode only)
 │   └── prune_checkpoints.py  # Scheduled pruning (production mode only)
 ├── tests/
-│   └── test_sanitize_client_history.py
+│   ├── test_sanitize_client_history.py
+│   ├── test_catalog.py        # catalog parsing, scope, SQL allow-listing
+│   └── test_agent_loader.py   # frontmatter, agent loader, skills loader
+├── frontmatter.py            # Pure YAML-frontmatter parser (agent + skill files)
 ├── history.py                # Pure sanitization utility for client history
+├── data_catalog.example.yaml # Template — copy to data_catalog.yaml per deployment
 ├── server.py                 # FastAPI app — REST + WebSocket /chat/stream
 ├── main.py                   # CLI REPL (poetry run eda)
 ├── pyproject.toml
@@ -307,6 +323,82 @@ All endpoints on `http://localhost:8000`.
 | `{"error": "…"}` | Turn failed |
 
 **Parsing rule:** attempt `JSON.parse()` on every message. If the result is a plain object, inspect `frame.type` or check for `done`/`error`. If parsing fails (or the value is not an object), the payload is a raw text token. Never forward an unrecognised object frame as a token.
+
+---
+
+## Domain deployment — scope the agent to your data
+
+The agent is **domain-agnostic**: each department runs its own instance pointed at
+its own data. One deployment = one domain, configured by files (no code changes).
+
+### 1. Data catalog (`data_catalog.yaml`)
+
+Copy the template and describe your datasets in natural language:
+
+```bash
+cp data_catalog.example.yaml data_catalog.yaml
+```
+
+```yaml
+domain:
+  name: Sales Analytics
+  description: Orders, revenue, and customers for the Sales team.
+datasets:
+  - id: my-project.sales            # fully-qualified project.dataset
+    description: Core transactional sales data.
+    tables:
+      - id: my-project.sales.orders # fully-qualified project.dataset.table
+        description: One row per order line.
+        fields:
+          - { name: order_id,   type: STRING,    description: Unique order id. }
+          - { name: amount_usd, type: NUMERIC,   description: Line total in USD. }
+```
+
+The catalog does two things:
+
+- **Scoping (security).** Only the listed datasets may be queried. Enforced
+  server-side in `tools/bigquery_tools.py` — `bq_run_query` parses every table
+  reference (via `sqlglot`) and rejects anything outside the catalog with a
+  `[SCOPE_DENIED …]` marker. The model is never trusted to stay in bounds.
+- **Context.** The descriptions are injected into the agent's system prompt so it
+  understands your data without blind schema exploration.
+
+**No catalog file → unscoped:** all datasets visible, no domain context (fine for
+local poking, logged as a warning, not for real deployments). Path override:
+`DATA_CATALOG_PATH`.
+
+### 2. Agent definitions (`agents/definitions/*.md`)
+
+The main agent and subagents are markdown files with YAML frontmatter
+(`name`, `description`, `tools`) plus a prompt body. Edit them to customize a
+deployment's behaviour without touching code. If the directory is removed, the
+orchestrator falls back to built-in defaults. The data catalog and skills index
+are appended to the main prompt automatically at build time.
+
+### 3. Skills (`skills/<name>/SKILL.md`)
+
+Reusable analysis playbooks (e.g. `key-comparison`, `data-quality-audit`). Only a
+compact **index** sits in the prompt; when a request matches, the agent calls the
+`load_skill(name)` tool to pull that skill's full step-by-step instructions on
+demand (progressive disclosure). Add a skill by dropping a new `SKILL.md` in its
+own folder — no code change.
+
+### 4. Knowledge base / remote MCP tools (`MCP_SERVERS`)
+
+The app is an **MCP client**: set `MCP_SERVERS` (a JSON list of stateless MCP
+servers) and their tools are added to the agent alongside the in-process tools.
+The intended first use is a knowledge base the agent queries for extra context
+during analysis. Empty by default (no-op); requires the `langchain-mcp-adapters`
+dependency.
+
+```dotenv
+MCP_SERVERS=[{"name":"knowledge_base","url":"https://kb.internal/mcp","transport":"streamable_http"}]
+```
+
+> **Why only the knowledge base, and not the data tools, over MCP?** The
+> `bq_run_query → df_* → chart_*` pipeline shares a live in-process DataFrame
+> cache that cannot cross a process boundary cheaply, so those tools stay
+> in-process. Stateless context servers (like a KB) are the right fit for MCP.
 
 ---
 
