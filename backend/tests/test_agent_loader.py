@@ -9,7 +9,7 @@ stack is imported — same isolation contract as test_catalog.py.
 
 import pytest
 
-from agents.loader import parse_agent_markdown
+from agents.loader import load_subagents, main_prompt_base, parse_agent_markdown
 from frontmatter import split_frontmatter
 from skills.loader import (
     get_skill_body,
@@ -95,7 +95,7 @@ def test_parse_agent_tools_not_a_list_raises():
 def test_seeded_skills_are_discovered():
     names = list_skill_names()
     assert "key-comparison" in names
-    assert "data-quality-audit" in names
+    assert "explore-data" in names
 
 
 def test_skill_index_mentions_seeded_skills():
@@ -112,3 +112,45 @@ def test_get_skill_body_returns_instructions():
 
 def test_get_skill_body_unknown_returns_none():
     assert get_skill_body("no-such-skill") is None
+
+
+# ── main_prompt_base and load_subagents (definitions dir) ─────────────────────
+
+
+def test_main_prompt_base_reads_definitions_file():
+    prompt = main_prompt_base()
+    assert isinstance(prompt, str)
+    assert len(prompt) > 50
+    assert "BigQuery" in prompt
+
+
+def test_load_subagents_returns_bq_explorer_and_viz_analyst():
+    subs = load_subagents(_full_registry())
+    names = {s["name"] for s in subs}
+    assert names == {"bq_explorer", "viz_analyst"}
+    assert len(subs) == 2
+
+
+def _full_registry() -> dict:
+    """Registry covering every tool referenced in any definitions/*.md file."""
+    tool_names = [
+        "bq_list_datasets", "bq_list_tables", "bq_describe_table",
+        "bq_run_query", "bq_profile_dataset", "df_check_key",
+        "df_describe", "chart_bar", "chart_line", "chart_scatter",
+        "chart_histogram", "chart_heatmap", "chart_interactive",
+        "report_start", "report_add_section", "report_add_chart",
+        "report_generate_html", "report_generate_pdf", "report_to_drive",
+    ]
+    return {name: (lambda: None) for name in tool_names}
+
+
+def test_load_subagents_bq_explorer_has_expected_tools():
+    subs = load_subagents(_full_registry())
+    explorer = next(s for s in subs if s["name"] == "bq_explorer")
+    assert len(explorer["tools"]) == 6
+
+
+def test_load_subagents_main_agent_excluded():
+    # main_agent.md must never appear as a subagent
+    subs = load_subagents(_full_registry())
+    assert all(s["name"] != "main_agent" for s in subs)

@@ -75,11 +75,6 @@ def load_agent_definition(
     return parse_agent_markdown(Path(path).read_text(), registry)
 
 
-def definitions_available() -> bool:
-    """True when a definitions dir with a main_agent.md is present."""
-    return (DEFINITIONS_DIR / f"{MAIN_AGENT_STEM}.md").is_file()
-
-
 def main_prompt_base() -> str:
     """The main agent's system-prompt body (catalog + skills are appended by
     the orchestrator, not here)."""

@@ -29,6 +29,12 @@ def _skill_files() -> tuple[Path, ...]:
     return tuple(sorted(SKILLS_DIR.glob("*/SKILL.md")))
 
 
+@lru_cache(maxsize=None)
+def _parse_skill(path: Path) -> tuple[dict, str]:
+    """Parse and cache a single SKILL.md file. One file read per process lifetime."""
+    return split_frontmatter(path.read_text())
+
+
 def _name_of(path: Path, meta: dict) -> str:
     return str(meta.get("name") or path.parent.name)
 
@@ -36,7 +42,7 @@ def _name_of(path: Path, meta: dict) -> str:
 def list_skill_names() -> list[str]:
     names = []
     for p in _skill_files():
-        meta, _ = split_frontmatter(p.read_text())
+        meta, _ = _parse_skill(p)
         names.append(_name_of(p, meta))
     return names
 
@@ -45,7 +51,7 @@ def load_skill_index() -> str:
     """Compact index injected into the system prompt. Empty string if none."""
     entries: list[str] = []
     for p in _skill_files():
-        meta, _ = split_frontmatter(p.read_text())
+        meta, _ = _parse_skill(p)
         name = _name_of(p, meta)
         desc = str(meta.get("description", "")).strip()
         when = str(meta.get("when_to_use", "")).strip()
@@ -68,7 +74,7 @@ def load_skill_index() -> str:
 def get_skill_body(name: str) -> str | None:
     """Return the instruction body for a named skill, or None if not found."""
     for p in _skill_files():
-        meta, body = split_frontmatter(p.read_text())
+        meta, body = _parse_skill(p)
         if _name_of(p, meta) == name:
             return body
     return None

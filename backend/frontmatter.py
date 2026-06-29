@@ -27,7 +27,7 @@ def split_frontmatter(text: str) -> tuple[dict, str]:
     A document without a leading `---` block yields ({}, original_text). The
     body is returned stripped of its leading/trailing blank lines.
     """
-    lines = text.lstrip("﻿").splitlines()
+    lines = text.lstrip("\ufeff").splitlines()  # strip UTF-8 BOM
     if not lines or lines[0].strip() != _DELIM:
         return {}, text.strip()
 

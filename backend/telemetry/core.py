@@ -145,7 +145,7 @@ def summarize_payload(obj: Any) -> Any:
                     "preview": dict(items),
                 }
         except Exception:
-            pass
+            return {"type": "dict", "repr": repr(obj)[:200]}
         return obj
 
     return obj

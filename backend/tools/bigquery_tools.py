@@ -135,7 +135,7 @@ def _assert_read_only(sql: str) -> None:
             "DATE_TRUNC(date, MONTH) not DATE_TRUNC('month', date))."
         )
 
-    if not statements:
+    if not statements or statements[0] is None:
         raise ValueError("Empty SQL statement.")
 
     if len(statements) > 1:
@@ -479,7 +479,7 @@ def bq_profile_dataset(dataset_id: str) -> str:
                     f"  {t.table_id:<45} {(meta.num_rows or 0):>12,} rows  "
                     f"{(meta.num_bytes or 0)/1e6:>8.1f} MB"
                 )
-            except Exception as e:
+            except GoogleAPIError as e:
                 logger.warning("Metadata fetch failed for %s: %s", t.table_id, e)
                 lines.append(
                     f"  {t.table_id} (metadata unavailable: {type(e).__name__})"

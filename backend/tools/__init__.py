@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from tools.analysis_tools import (
     df_check_key,
     df_compare,
@@ -41,7 +43,7 @@ from tools.viz_tools import (
     chart_scatter,
 )
 
-ALL_TOOLS = [
+ALL_TOOLS: list[Callable] = [
     # Data ingestion
     bq_list_datasets, bq_list_tables, bq_describe_table,
     bq_run_query, bq_profile_dataset,

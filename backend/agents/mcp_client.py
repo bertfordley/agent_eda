@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from typing import Any
 
 from config.settings import settings
@@ -45,7 +46,7 @@ def _to_connections(servers: list[dict]) -> dict[str, dict]:
     return connections
 
 
-def _run_coro_blocking(coro):
+def _run_coro_blocking(coro: Coroutine[Any, Any, Any]) -> Any:
     """Run an async coroutine to completion from a sync caller, whether or not an
     event loop is already running (build_agent may be invoked inside FastAPI's
     async lifespan)."""

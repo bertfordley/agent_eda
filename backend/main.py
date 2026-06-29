@@ -24,7 +24,7 @@ from rich.prompt import Prompt
 
 from agents.orchestrator import chat as agent_chat, get_agent
 from telemetry.core import turn_span
-from tools.bigquery_tools import current_session_id
+from tools.bigquery_tools import current_session_id, current_thread_id
 
 console = Console()
 
@@ -51,6 +51,7 @@ def cli(query: tuple[str, ...]):
     if query:
         session_id = uuid.uuid4().hex
         sid_token = current_session_id.set(session_id)
+        tid_token = current_thread_id.set(session_id)
         try:
             get_agent()
             message = " ".join(query)
@@ -66,11 +67,13 @@ def cli(query: tuple[str, ...]):
             console.print(Markdown(reply))
         finally:
             current_session_id.reset(sid_token)
+            current_thread_id.reset(tid_token)
         return
 
     # REPL mode — one session_id for the whole process lifetime.
     session_id = uuid.uuid4().hex
     sid_token = current_session_id.set(session_id)
+    tid_token = current_thread_id.set(session_id)
 
     console.print(Panel(BANNER, expand=False))
     get_agent()  # warm up eagerly
@@ -102,6 +105,7 @@ def cli(query: tuple[str, ...]):
             )
     finally:
         current_session_id.reset(sid_token)
+        current_thread_id.reset(tid_token)
 
 
 if __name__ == "__main__":

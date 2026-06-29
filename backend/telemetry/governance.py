@@ -27,9 +27,12 @@ The entity_resolution event is defined now so that:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from telemetry.core import log_event, truncate_value
+
+logger = logging.getLogger(__name__)
 
 
 def log_thread_resumed(thread_id: str) -> None:
@@ -43,9 +46,8 @@ def log_thread_resumed(thread_id: str) -> None:
     """
     try:
         log_event("governance.thread_resumed", thread_id=thread_id)
-    except Exception:
-        # Governance logging must never block request handling.
-        pass
+    except Exception as exc:
+        logger.warning("governance emit failed: %s", exc)
 
 
 def log_query_executed(
@@ -84,9 +86,8 @@ def log_query_executed(
             resolved_entities=[],   # will be list[dict] when ER layer is live
             applied_definitions=[], # will be list[str] when governance rules exist
         )
-    except Exception:
-        # Governance logging must never block query execution.
-        pass
+    except Exception as exc:
+        logger.warning("governance emit failed: %s", exc)
 
 
 def log_entity_resolution(
