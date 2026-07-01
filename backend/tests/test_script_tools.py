@@ -10,6 +10,7 @@ from __future__ import annotations
 
 # Stub out the tools package before importing so tools/__init__.py (which eagerly
 # imports matplotlib/jinja2/etc.) does not run — mirrors test_bigquery_tools.py.
+import inspect
 import sys
 import types
 from pathlib import Path
@@ -108,9 +109,9 @@ def test_missing_file(enabled, skill):
 def test_non_string_args_rejected(enabled, skill):
     _write_script(skill, "hi.py", "print('x')")
 
-    result = run_skill_script("match-scoring", "hi.py", args=[1, 2])  # type: ignore[list-item]
+    result = run_skill_script("match-scoring", "hi.py", script_args=[1, 2])  # type: ignore[list-item]
 
-    assert "args must be a list of strings" in result
+    assert "script_args must be a list of strings" in result
 
 
 # ── Execution bounds ──────────────────────────────────────────────────────────
@@ -168,7 +169,7 @@ def test_args_passthrough_and_assets(enabled, skill):
     result = run_skill_script(
         "match-scoring",
         "evaluate_match_score.py",
-        args=["--config", "config.txt", "--profile", "p.txt"],
+        script_args=["--config", "config.txt", "--profile", "p.txt"],
     )
 
     assert "ARGS=--config config.txt --profile p.txt" in result
@@ -219,8 +220,24 @@ def test_json_matches_integrity(enabled, skill):
     matches = '{"buyer": "ACME", "min_score": 0.8, "tags": ["a b", "c"]}'
 
     result = run_skill_script(
-        "match-scoring", "evaluate_match_score.py", args=["--matches", matches]
+        "match-scoring", "evaluate_match_score.py", script_args=["--matches", matches]
     )
 
     assert "BUYER=ACME" in result
     assert "TAG0=a b" in result
+
+
+# ── tool-schema safety (regression guard) ──────────────────────────────────
+
+
+def test_run_skill_script_avoids_reserved_pydantic_names():
+    # Production incident guard: LangChain's schema inference for plain
+    # (non-@tool) callables goes through Pydantic's legacy ValidatedFunction,
+    # which reserves "args"/"kwargs" as internal sentinel field names for its
+    # own *args/**kwargs bookkeeping. A real parameter literally named "args"
+    # collided with that and leaked a mangled "v__args" kwarg into the actual
+    # call, crashing with:
+    #   TypeError: run_skill_script() got an unexpected keyword argument 'v__args'
+    # Never name a tool parameter "args" or "kwargs".
+    params = set(inspect.signature(run_skill_script).parameters)
+    assert not (params & {"args", "kwargs"})

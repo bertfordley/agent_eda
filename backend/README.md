@@ -342,17 +342,24 @@ skills/<name>/
 └── scripts/    # runnable scripts, e.g. evaluate_match_score.py
 ```
 
-The agent runs one via the `run_skill_script(skill_name, script, args)` tool,
-which is **disabled by default** — set `SKILL_EXEC_ENABLED=true` to allow it. Only
-`.py` files under the skill's own `scripts/` folder may run (a resolved
+The agent runs one via the `run_skill_script(skill_name, script, script_args)`
+tool, which is **disabled by default** — set `SKILL_EXEC_ENABLED=true` to allow it.
+Only `.py` files under the skill's own `scripts/` folder may run (a resolved
 path-traversal guard blocks anything else), execution is bounded by
 `SKILL_SCRIPT_TIMEOUT_SEC` / `SKILL_SCRIPT_MAX_OUTPUT_CHARS`, secrets are withheld
 from the child process, and every attempt is audited via the
 `governance.script_executed` event.
 
+> The third parameter is named `script_args`, not `args` — a real tool
+> parameter literally named `args` collides with a reserved sentinel field name
+> in Pydantic's legacy schema-inference machinery (used by LangChain for plain,
+> undecorated callables) and crashes every call with
+> `TypeError: ...() got an unexpected keyword argument 'v__args'`. Never name a
+> tool parameter `args` or `kwargs`.
+
 The script runs as a **separate process**, so it **cannot read the in-process
-DataFrame cache**. Pass any data it needs through `args` — e.g. the match-scoring
-skill takes `--config`/`--profile` (filenames it reads from its own `assets/`,
+DataFrame cache**. Pass any data it needs through `script_args` — e.g. the
+match-scoring skill takes `--config`/`--profile` (filenames it reads from its own `assets/`,
 since `cwd` is the skill folder) and `--matches` (an inline JSON string the agent
 builds from the user's input per the skill's `SKILL.md`).
 

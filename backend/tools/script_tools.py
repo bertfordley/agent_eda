@@ -17,11 +17,20 @@ SECURITY MODEL (why this is narrow by design):
     GCP credentials, DB URIs, or the checkpoint encryption key from os.environ.
   • Bounded: timeout and output-size caps come from settings.
 
-The tool is deliberately generic (skill_name, script, args). It does not parse
-or bound flag values like --config/--profile/--matches; a skill's own script is
-responsible for resolving its assets/ files and validating its inputs. cwd is
-set to the skill's base dir so the script can read assets/<name> relative to
-itself.
+The tool is deliberately generic (skill_name, script, script_args). It does not
+parse or bound flag values like --config/--profile/--matches; a skill's own
+script is responsible for resolving its assets/ files and validating its
+inputs. cwd is set to the skill's base dir so the script can read assets/<name>
+relative to itself.
+
+NAMING GOTCHA: the third parameter is `script_args`, not `args`. LangChain's
+schema inference for plain callables (no @tool decorator) goes through
+Pydantic's legacy ValidatedFunction, which reserves "args"/"kwargs" as internal
+sentinel field names for its own *args/**kwargs bookkeeping. A real parameter
+literally named `args` collides with that and gets shadowed by a mangled
+"v__args" field, which then leaks through as an unexpected kwarg at call time
+(TypeError: got an unexpected keyword argument 'v__args'). Do not rename this
+back to `args`.
 """
 
 from __future__ import annotations
@@ -69,7 +78,7 @@ def _cap_output(text: str) -> str:
     return text
 
 
-def run_skill_script(skill_name: str, script: str, args: list[str] | None = None) -> str:
+def run_skill_script(skill_name: str, script: str, script_args: list[str] | None = None) -> str:
     """
     Run a vetted script that ships inside a skill's folder and return its output.
 
@@ -78,23 +87,23 @@ def run_skill_script(skill_name: str, script: str, args: list[str] | None = None
     skill's base folder, so it can read its own assets/ files.
 
     Args:
-        skill_name: Skill name from the skills index (e.g. 'match-scoring').
-        script:     Script filename inside the skill's scripts/ folder
-                    (e.g. 'evaluate_match_score.py'). Must stay inside that folder.
-        args:       Optional command-line arguments passed to the script, e.g.
-                    ['--config', 'cfg.yaml', '--profile', 'p.yaml', '--matches', '{...}'].
-                    A JSON --matches value is passed verbatim (no shell escaping).
+        skill_name:  Skill name from the skills index (e.g. 'match-scoring').
+        script:      Script filename inside the skill's scripts/ folder
+                     (e.g. 'evaluate_match_score.py'). Must stay inside that folder.
+        script_args: Optional command-line arguments passed to the script, e.g.
+                     ['--config', 'cfg.yaml', '--profile', 'p.yaml', '--matches', '{...}'].
+                     A JSON --matches value is passed verbatim (no shell escaping).
     """
     # Import here (not at module top) so telemetry can import tools without a
     # circular import — mirrors bq_run_query's lazy governance import.
     from telemetry.governance import log_script_executed
 
     started = time.monotonic()
-    message, accepted, reason, exit_code = _evaluate(skill_name, script, args)
+    message, accepted, reason, exit_code = _evaluate(skill_name, script, script_args)
     log_script_executed(
         skill_name=skill_name,
         script=script,
-        args=args,
+        args=script_args,
         accepted=accepted,
         rejection_reason=reason,
         exit_code=exit_code,
@@ -104,7 +113,7 @@ def run_skill_script(skill_name: str, script: str, args: list[str] | None = None
 
 
 def _evaluate(
-    skill_name: str, script: str, args: list[str] | None
+    skill_name: str, script: str, script_args: list[str] | None
 ) -> tuple[str, bool, str | None, int | None]:
     """Do the work; return (message, accepted, rejection_reason, exit_code).
 
@@ -118,13 +127,15 @@ def _evaluate(
         )
         return msg, False, SKILL_EXEC_DISABLED, None
 
-    # Validate args: must be a list of strings the argv can accept.
+    # Validate script_args: must be a list of strings the argv can accept.
     arg_list: list[str] = []
-    if args is not None:
-        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-            msg = f"[{SKILL_SCRIPT_ERROR}] args must be a list of strings."
-            return msg, False, "args must be a list of strings", None
-        arg_list = args
+    if script_args is not None:
+        if not isinstance(script_args, list) or not all(
+            isinstance(a, str) for a in script_args
+        ):
+            msg = f"[{SKILL_SCRIPT_ERROR}] script_args must be a list of strings."
+            return msg, False, "script_args must be a list of strings", None
+        arg_list = script_args
 
     base = get_skill_dir(skill_name)
     if base is None:

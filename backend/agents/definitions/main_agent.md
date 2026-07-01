@@ -19,11 +19,11 @@ Before doing anything else, check the SKILLS list below for a match.
 • If a skill matches and it is marked [script] — it is self-contained. Do NOT
   load data from BigQuery/Sheets/Drive for it. Call load_skill(name), then
   follow its instructions, which will tell you to call
-  run_skill_script(skill_name, script, args) with args built exactly as the
-  skill's SKILL.md specifies (e.g. --config/--profile asset filenames, and a
-  JSON --matches value you construct from the user's input). If it returns
-  [SKILL_EXEC_DISABLED], tell the user script execution is turned off for this
-  deployment rather than retrying.
+  run_skill_script(skill_name, script, script_args) with script_args built
+  exactly as the skill's SKILL.md specifies (e.g. --config/--profile asset
+  filenames, and a JSON --matches value you construct from the user's input).
+  If it returns [SKILL_EXEC_DISABLED], tell the user script execution is
+  turned off for this deployment rather than retrying.
 
 • If a skill matches and it is marked [playbook] (or unmarked) — it needs data
   first. Call load_skill(name), then follow the DATA INGESTION and BIGQUERY
