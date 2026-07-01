@@ -120,6 +120,13 @@ class Settings:
     agent_fs_backend: str = os.getenv("AGENT_FS_BACKEND", "state")   # "state" | "local"
     agent_workspace_dir: Path = Path(os.getenv("AGENT_WORKSPACE_DIR", "./workspace"))
 
+    # Skill script execution (opt-in; disabled by default). When enabled, the
+    # run_skill_script tool may execute vetted scripts that ship inside a skill's
+    # own scripts/ folder. Off by default to preserve the read-only posture.
+    skill_exec_enabled: bool = _parse_bool("SKILL_EXEC_ENABLED", "false")
+    skill_script_timeout_sec: int = _parse_int("SKILL_SCRIPT_TIMEOUT_SEC", "30")
+    skill_script_max_output_chars: int = _parse_int("SKILL_SCRIPT_MAX_OUTPUT_CHARS", "10000")
+
     # Output dirs
     charts_dir: Path = Path(os.getenv("CHARTS_DIR", "./charts"))
     reports_dir: Path = Path(os.getenv("REPORTS_DIR", "./reports"))

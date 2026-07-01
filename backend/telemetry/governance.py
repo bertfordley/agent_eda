@@ -90,6 +90,42 @@ def log_query_executed(
         logger.warning("governance emit failed: %s", exc)
 
 
+def log_script_executed(
+    skill_name: str,
+    script: str,
+    args: list[str] | None,
+    accepted: bool,
+    rejection_reason: str | None = None,
+    exit_code: int | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """
+    Emit a governance audit event for every skill-script execution attempt.
+
+    Called at every exit path of run_skill_script:
+      - execution disabled / skill unknown / path denied / not found
+                                       (accepted=False, exit_code=None)
+      - timed out or errored           (accepted=False, exit_code=None)
+      - ran to completion              (accepted=True, exit_code=N)
+
+    accepted=True means the script was actually launched (regardless of its exit
+    code); accepted=False means it was blocked before launch.
+    """
+    try:
+        log_event(
+            "governance.script_executed",
+            skill_name=skill_name,
+            script=script,
+            args=[truncate_value(a) for a in (args or [])],
+            accepted=accepted,
+            rejection_reason=truncate_value(rejection_reason) if rejection_reason else None,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        logger.warning("governance emit failed: %s", exc)
+
+
 def log_entity_resolution(
     mention: str,
     resolved_to: Any,

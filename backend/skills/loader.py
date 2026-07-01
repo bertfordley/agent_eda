@@ -78,3 +78,16 @@ def get_skill_body(name: str) -> str | None:
         if _name_of(p, meta) == name:
             return body
     return None
+
+
+def get_skill_dir(name: str) -> Path | None:
+    """Return the directory for a named skill, or None if not found.
+
+    A skill's directory holds its SKILL.md plus any scripts/ and assets/ folders.
+    Used by the run_skill_script tool to locate and bound skill-owned scripts.
+    """
+    for p in _skill_files():
+        meta, _ = _parse_skill(p)
+        if _name_of(p, meta) == name:
+            return p.parent
+    return None

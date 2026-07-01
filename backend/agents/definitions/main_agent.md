@@ -26,6 +26,12 @@ requires a tool call.
 3. When a request matches a SKILL listed below, call load_skill(name) and follow
    its steps (e.g. explore-data for profiling a new table, key-comparison for
    reconciling two datasets, statistical-analysis for trend or distribution work).
+   If a skill's instructions tell you to run a bundled script, call
+   run_skill_script(skill_name, script, args) — build args exactly as the skill's
+   SKILL.md specifies (e.g. --config/--profile filenames from its assets, and a
+   JSON --matches value you construct from the user's input). If it returns
+   [SKILL_EXEC_DISABLED], tell the user script execution is turned off for this
+   deployment rather than retrying.
 4. Generate charts to support key findings — tell the user the file path.
 
 ━━ COMPLEXITY CLASSIFICATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -195,6 +195,9 @@ CHARTS_DIR=./charts
 REPORTS_DIR=./reports
 DATA_CATALOG_PATH=./data_catalog.yaml   # omit to run unscoped
 MCP_SERVERS=[]                          # JSON list of {name, url} remote MCP servers
+SKILL_EXEC_ENABLED=false                # allow run_skill_script to execute skill-owned scripts
+SKILL_SCRIPT_TIMEOUT_SEC=30             # per-script wall-clock limit
+SKILL_SCRIPT_MAX_OUTPUT_CHARS=10000     # cap on captured stdout+stderr returned to the agent
 
 # CHECKPOINT_DB_URI intentionally absent → dev fallback mode
 ```
@@ -309,7 +312,7 @@ poetry run ruff format .
 
 ### Adding a new tool
 
-1. Add your function to the appropriate file in `tools/`, decorated with `@tool`.
+1. Add a plain Python function to the appropriate file in `tools/` — no `@tool` decorator needed. Give every argument and the return type a type hint, and write a docstring with an `Args:` section; deepagents derives the tool's name, schema, and description from these, and they become what the model sees.
 2. Import and append it to `ALL_TOOLS` in `tools/__init__.py`.
 3. If it belongs to a subagent, add the tool name to that subagent's `tools:` list in `agents/definitions/<subagent>.md` — **not** in any Python file.
 4. Restart the server (`get_agent()` is `@lru_cache(maxsize=1)` — call `get_agent.cache_clear()` to reload without restarting).
@@ -320,6 +323,31 @@ poetry run ruff format .
 2. Restart the server — the skills index is rebuilt automatically.
 
 No code changes required.
+
+#### Skills that run a script
+
+A skill may ship executable helpers next to its `SKILL.md`:
+
+```
+skills/<name>/
+├── SKILL.md
+├── assets/     # config/profile/data files the script reads
+└── scripts/    # runnable scripts, e.g. evaluate_match_score.py
+```
+
+The agent runs one via the `run_skill_script(skill_name, script, args)` tool,
+which is **disabled by default** — set `SKILL_EXEC_ENABLED=true` to allow it. Only
+`.py` files under the skill's own `scripts/` folder may run (a resolved
+path-traversal guard blocks anything else), execution is bounded by
+`SKILL_SCRIPT_TIMEOUT_SEC` / `SKILL_SCRIPT_MAX_OUTPUT_CHARS`, secrets are withheld
+from the child process, and every attempt is audited via the
+`governance.script_executed` event.
+
+The script runs as a **separate process**, so it **cannot read the in-process
+DataFrame cache**. Pass any data it needs through `args` — e.g. the match-scoring
+skill takes `--config`/`--profile` (filenames it reads from its own `assets/`,
+since `cwd` is the skill folder) and `--matches` (an inline JSON string the agent
+builds from the user's input per the skill's `SKILL.md`).
 
 ### Editing agent behavior
 

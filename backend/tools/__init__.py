@@ -33,6 +33,7 @@ from tools.report_tools import (
     report_start,
     report_to_drive,
 )
+from tools.script_tools import run_skill_script
 from tools.skill_tools import load_skill
 from tools.viz_tools import (
     chart_bar,
@@ -62,4 +63,6 @@ ALL_TOOLS: list[Callable] = [
     report_generate_html, report_generate_pdf, report_to_drive,
     # Skills (progressive disclosure of analysis playbooks)
     load_skill,
+    # Script execution (gated; runs vetted skill-owned scripts only)
+    run_skill_script,
 ]
