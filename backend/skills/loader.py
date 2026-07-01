@@ -39,6 +39,15 @@ def _name_of(path: Path, meta: dict) -> str:
     return str(meta.get("name") or path.parent.name)
 
 
+def _kind_of(meta: dict) -> str:
+    """'playbook' (default) or 'script'. Unrecognized values fall back to
+    'playbook' — this is advisory routing metadata, not a correctness contract,
+    so it fails soft rather than raising (unlike agents/loader.py's tools:
+    validation)."""
+    kind = str(meta.get("kind") or "playbook").strip().lower()
+    return kind if kind in ("playbook", "script") else "playbook"
+
+
 def list_skill_names() -> list[str]:
     names = []
     for p in _skill_files():
@@ -47,9 +56,12 @@ def list_skill_names() -> list[str]:
     return names
 
 
+# NOTE: "[playbook]"/"[script]" literal tags below are referenced by name in
+# agents/definitions/main_agent.md's ROUTING section — keep in sync.
 def load_skill_index() -> str:
     """Compact index injected into the system prompt. Empty string if none."""
-    entries: list[str] = []
+    playbook_entries: list[str] = []
+    script_entries: list[str] = []
     for p in _skill_files():
         meta, _ = _parse_skill(p)
         name = _name_of(p, meta)
@@ -58,17 +70,31 @@ def load_skill_index() -> str:
         line = f"  • {name}: {desc}"
         if when:
             line += f"  [use when: {when}]"
-        entries.append(line)
+        if _kind_of(meta) == "script":
+            script_entries.append(line)
+        else:
+            playbook_entries.append(line)
 
-    if not entries:
+    if not playbook_entries and not script_entries:
         return ""
 
-    return (
+    sections = [
         "━━ SKILLS ━━\n"
         "Reusable analysis playbooks. When a request matches one, call "
         "load_skill(<name>) to get its full step-by-step instructions, then "
-        "follow them.\n" + "\n".join(entries)
-    )
+        "follow them."
+    ]
+    if playbook_entries:
+        sections.append(
+            "[playbook] — needs BigQuery/Sheets/Drive data first, then "
+            "follow the BIGQUERY ANALYSIS FLOW:\n" + "\n".join(playbook_entries)
+        )
+    if script_entries:
+        sections.append(
+            "[script] — self-contained; do NOT load data first, call "
+            "run_skill_script as the skill instructs:\n" + "\n".join(script_entries)
+        )
+    return "\n\n".join(sections)
 
 
 def get_skill_body(name: str) -> str | None:

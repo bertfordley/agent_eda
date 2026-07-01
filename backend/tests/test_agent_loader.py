@@ -7,11 +7,15 @@ All exercise pure logic with an injected fake tool registry, so no heavy tool
 stack is imported — same isolation contract as test_catalog.py.
 """
 
+from pathlib import Path
+
 import pytest
 
+import skills.loader as skills_loader
 from agents.loader import load_subagents, main_prompt_base, parse_agent_markdown
 from frontmatter import split_frontmatter
 from skills.loader import (
+    _kind_of,
     get_skill_body,
     list_skill_names,
     load_skill_index,
@@ -112,6 +116,45 @@ def test_get_skill_body_returns_instructions():
 
 def test_get_skill_body_unknown_returns_none():
     assert get_skill_body("no-such-skill") is None
+
+
+def test_kind_of_normalizes_unknown_value_to_playbook():
+    assert _kind_of({}) == "playbook"
+    assert _kind_of({"kind": "bogus"}) == "playbook"
+    assert _kind_of({"kind": "PLAYBOOK"}) == "playbook"
+    assert _kind_of({"kind": "script"}) == "script"
+    assert _kind_of({"kind": "  script  "}) == "script"
+
+
+def test_kind_defaults_to_playbook_for_seeded_skills():
+    # None of the 5 seeded skills declare kind, so all fall into [playbook]
+    # and no [script] group should render.
+    index = load_skill_index()
+    assert "[playbook]" in index
+    assert "[script]" not in index
+
+
+def test_skill_index_groups_by_kind(monkeypatch):
+    # Inject one fake kind: script skill alongside the real seeded ones to
+    # prove load_skill_index() actually groups by kind (none of the real
+    # skills qualify for the [script] branch).
+    real_skill_files = skills_loader._skill_files()
+    real_parse_skill = skills_loader._parse_skill
+    fake_path = Path("/fake/fake-script-skill/SKILL.md")
+
+    def fake_parse_skill(path):
+        if path == fake_path:
+            return ({"name": "fake-script-skill", "description": "d", "kind": "script"}, "body")
+        return real_parse_skill(path)
+
+    monkeypatch.setattr(skills_loader, "_skill_files", lambda: (*real_skill_files, fake_path))
+    monkeypatch.setattr(skills_loader, "_parse_skill", fake_parse_skill)
+
+    index = skills_loader.load_skill_index()
+
+    assert "[playbook]" in index
+    assert "[script]" in index
+    assert index.index("fake-script-skill") > index.index("[script]")
 
 
 # ── main_prompt_base and load_subagents (definitions dir) ─────────────────────

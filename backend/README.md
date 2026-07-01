@@ -319,8 +319,15 @@ poetry run ruff format .
 
 ### Adding a new skill
 
-1. Create `skills/<name>/SKILL.md` with YAML frontmatter (`name`, `description`, `when_to_use`) and a step-by-step body.
-2. Restart the server — the skills index is rebuilt automatically.
+1. Create `skills/<name>/SKILL.md` with YAML frontmatter (`name`, `description`,
+   `when_to_use`, and optional `kind`) and a step-by-step body.
+   - `kind: playbook` (default, may be omitted) — the skill needs BigQuery/Sheets/
+     Drive data; the main agent loads data first, then follows the playbook.
+   - `kind: script` — the skill is self-contained and runs via
+     `run_skill_script`; the main agent does NOT load data first. Use this for
+     skills that ship a `scripts/` folder (see below) and don't touch the data
+     warehouse.
+2. Restart the server — the skills index is rebuilt automatically, grouped by `kind`.
 
 No code changes required.
 
@@ -429,13 +436,13 @@ Without a catalog file the agent is unscoped. This is logged as a warning and is
 
 `skills/<name>/SKILL.md` — analysis playbooks loaded on demand. Only a compact index sits in the system prompt; when a request matches, the agent calls `load_skill(name)` to pull the full step-by-step instructions.
 
-| Skill | Purpose |
-|-------|---------|
-| `explore-data` | 7-step data profile: shape, quality, distributions, patterns |
-| `key-comparison` | Reconcile two tables on a shared key |
-| `statistical-analysis` | Descriptive stats, trends, outliers, correlations, cautions |
-| `data-visualization` | Chart type selection, design standards, generation steps |
-| `build-dashboard` | Self-contained interactive HTML dashboard (Chart.js template) |
+| Skill | Kind | Purpose |
+|-------|------|---------|
+| `explore-data` | playbook | 7-step data profile: shape, quality, distributions, patterns |
+| `key-comparison` | playbook | Reconcile two tables on a shared key |
+| `statistical-analysis` | playbook | Descriptive stats, trends, outliers, correlations, cautions |
+| `data-visualization` | playbook | Chart type selection, design standards, generation steps |
+| `build-dashboard` | playbook | Self-contained interactive HTML dashboard (Chart.js template) |
 
 ### 4. Remote MCP tools
 
